@@ -17,6 +17,8 @@ CARRY_BUDGET = 12   # max path cost to the next dot when carrying nothing
 CARRY_STEP = 2      # ... shrinks by this per carried dot
 SAFE_RETURN = False  # eat a dot only if a safe way home / to a capsule exists afterwards
 INVADER_SNAP = True # at home with nothing carried: eat an invader within 3 steps
+GUARD_CAPS = True   # defender also covers our capsules against a chased invader
+SCARED_GAP = 2     # scared defender keeps exactly this distance from the invader while blocking
 
 from contest.capture_agents import CaptureAgent
 from contest.game import Directions
@@ -742,6 +744,82 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
         walls = game_state.get_walls()
         x = walls.width // 2 - 1 if self.red else walls.width // 2
         self.border = [(x, y) for y in range(walls.height) if not walls[x][y]]
+        self.exits, self.home_cells = [], set()
+        try:
+            mid = walls.width // 2
+            ex = x + 1 if self.red else x - 1
+            self.exits = [(x, y) for y in range(walls.height) if not walls[x][y] and not walls[ex][y]]
+            for cx in (range(0, mid) if self.red else range(mid, walls.width)):
+                for cy in range(walls.height):
+                    if not walls[cx][cy]:
+                        self.home_cells.add((cx, cy))
+        except Exception:
+            self.exits = []
+
+    GUARD_W = 2.0
+    MOVES = (('North', (0, 1)), ('South', (0, -1)), ('East', (1, 0)), ('West', (-1, 0)), ('Stop', (0, 0)))
+
+    def _guard(self, game_state):
+        """Exit denial (from r02cand2). Food only counts when the invader gets home, so stand where
+        we reach every border exit no later than the invader (margin <= 0) and close in from there.
+        With no invader, wait near the exit closest to the enemy most likely to cross.
+        Returns an action or None."""
+        legal = game_state.get_legal_actions(self.index)
+        my_state = game_state.get_agent_state(self.index)
+        mp = my_state.get_position()
+        me = (int(mp[0]), int(mp[1]))
+        if my_state.is_pacman or not self.exits:
+            return None
+        dist = self.get_maze_distance
+        invs, ghosts = [], []
+        for e in self.get_opponents(game_state):
+            st = game_state.get_agent_state(e)
+            p = game_state.get_agent_position(e)
+            hidden = p is None
+            if hidden:
+                p = self.tracker.most_likely(e)
+            p = (int(p[0]), int(p[1]))
+            (invs if st.is_pacman else ghosts).append((p, hidden, st.num_carrying))
+        if invs:
+            q, hidden, _ = max(invs, key=lambda t: (t[2], -dist(me, t[0])))
+            chase = True
+        elif ghosts:
+            q, hidden, _ = min(ghosts, key=lambda t: min(dist(t[0], b) for b in self.exits))
+            chase = False
+        else:
+            return None
+        ex = [(b, dist(q, b)) for b in self.exits]
+        b_star = min(ex, key=lambda t: t[1])[0]
+        if chase and GUARD_CAPS and my_state.scared_timer == 0:
+            # an invader that eats our capsule walks out past the scared defender: cover it too
+            for c in self.get_capsules_you_are_defending(game_state):
+                ex.append((c, dist(q, c)))
+        floor = -6 if hidden else -4
+        scared = my_state.scared_timer > 0
+        best, bv = None, None
+        for name, (dx, dy) in DefensiveReflexAgent.MOVES:
+            if name not in legal:
+                continue
+            n = (me[0] + dx, me[1] + dy)
+            if n not in self.home_cells:
+                continue
+            margin = max(dist(n, b) - dq for b, dq in ex)
+            if margin < floor:
+                margin = floor
+            if chase:
+                dn = dist(n, q)
+                if scared:
+                    # scared: keep blocking the exits, but never end next to the invader
+                    # (from 2 steps it cannot reach us in one move)
+                    if dn <= SCARED_GAP - 1:
+                        margin += 100
+                    dn = abs(dn - SCARED_GAP)
+            else:
+                dn = dist(n, b_star)
+            v = (margin, dn, 1 if name == 'Stop' else 0)
+            if bv is None or v < bv:
+                bv, best = v, name
+        return best
 
     def choose_action(self, game_state):
         try:
@@ -749,6 +827,12 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
             self._targets = self._belief_targets(game_state)
         except Exception:
             self._targets = None
+        try:
+            a = self._guard(game_state)
+            if a is not None and a in game_state.get_legal_actions(self.index):
+                return a
+        except Exception:
+            pass
         try:
             return ReflexCaptureAgent.choose_action(self, game_state)
         except Exception:
