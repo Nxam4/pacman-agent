@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+arena/work/
+arena/logs/
+arena/db/
+arena/STOP
