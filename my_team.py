@@ -19,6 +19,13 @@ SAFE_RETURN = False  # eat a dot only if a safe way home / to a capsule exists a
 INVADER_SNAP = True # at home with nothing carried: eat an invader within 3 steps
 GUARD_CAPS = True   # defender also covers our capsules against a chased invader
 SCARED_GAP = 2     # scared defender keeps exactly this distance from the invader while blocking
+HELP_ON = True      # attacker joins the defender's exit cover as a second jaw (from r04cand2)
+TRAP_ON = True      # invader inside a dead-end branch on our side: defender holds its mouth
+HELP_MIN_CARRY = 3  # helper joins for an invader carrying at least this many ...
+HELP_NEAR = 8       # ... or any invader within this many steps of the (at-home) attacker
+HELP_BORDER = 6     # attacker may come back from at most this far into the enemy side
+HELP_MAX_CARRY = 2  # ... and only while carrying at most this many
+PINCER_LOG_PATH = ''  # dev only: per-game kills / conceded log ('' = off; env PINCER_LOG overrides)
 
 from contest.capture_agents import CaptureAgent
 from contest.game import Directions
@@ -86,6 +93,7 @@ class EnemyTracker(object):
         self.last_index = None   # our agent that updated last (to know which enemies moved since)
         self.prev_food = set(agent.get_food_you_are_defending(game_state).as_list()) | \
             set(agent.get_capsules_you_are_defending(game_state))
+        self.kills = 0
 
     # ---- helpers -------------------------------------------------------------------------
     def _on_enemy_home_side(self, cell):
@@ -147,6 +155,7 @@ class EnemyTracker(object):
                      any(p is not None and abs(ls[0] - p[0]) + abs(ls[1] - p[1]) <= 2 for p in team_pos))
             if eaten:
                 b = {self.start[e]: 1.0}
+                self.kills += 1
             elif e in movers:                   # elapse time: uniform over legal moves (incl. stop)
                 nb = {}
                 for c, p in b.items():
@@ -203,6 +212,252 @@ class EnemyTracker(object):
         return sum(b.get(c, 0.0) for c in cells)
 
 
+
+
+##################
+# Joint exit cover #
+##################
+MOVES5 = (('North', (0, 1)), ('South', (0, -1)), ('East', (1, 0)), ('West', (-1, 0)), ('Stop', (0, 0)))
+
+
+class DefGeo(object):
+    """Static geometry of OUR half for the defenders: home cells, exits (home cells next to the
+    enemy side), dead-end branches (cells stripped as leaves), the mouth of each branch (the core
+    cell it hangs off) and whether a branch touches the enemy side (then it is no trap)."""
+
+    def __init__(self, agent, game_state):
+        walls = game_state.get_walls()
+        W, H = walls.width, walls.height
+        mid = W // 2
+        red = agent.red
+        self.home = lambda c: (c[0] < mid) if red else (c[0] >= mid)
+        cells = [(x, y) for x in range(W) for y in range(H) if not walls[x][y]]
+        cset = set(cells)
+        self.nb = {}
+        for (x, y) in cells:
+            self.nb[(x, y)] = [c for c in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)) if c in cset]
+        self.home_cells = [c for c in cells if self.home(c)]
+        self.home_set = set(self.home_cells)
+        self.exits = [c for c in self.home_cells if any(not self.home(n) for n in self.nb[c])]
+        deg = dict((c, len(self.nb[c])) for c in cells)
+        removed = set()
+        queue = [c for c in cells if deg[c] <= 1]
+        while queue:
+            c = queue.pop()
+            if c in removed:
+                continue
+            removed.add(c)
+            for n in self.nb[c]:
+                if n not in removed:
+                    deg[n] -= 1
+                    if deg[n] <= 1:
+                        queue.append(n)
+        self.mouth = {}
+        self.branch = {}
+        if len(removed) < len(cells):
+            core = [c for c in cells if c not in removed]
+            frontier = []
+            for c in core:
+                for n in self.nb[c]:
+                    if n in removed and n not in self.mouth:
+                        self.mouth[n] = c
+                        self.branch[n] = n
+                        frontier.append(n)
+            while frontier:
+                nxt = []
+                for c in frontier:
+                    for n in self.nb[c]:
+                        if n in removed and n not in self.mouth:
+                            self.mouth[n] = self.mouth[c]
+                            self.branch[n] = self.branch[c]
+                            nxt.append(n)
+                frontier = nxt
+        bad = set()
+        for c, b in self.branch.items():
+            if not self.home(c):
+                bad.add(b)
+        self.trap_branch = set(b for b in set(self.branch.values()) if b not in bad)
+
+    def trapped_mouth(self, q):
+        """Mouth cell if q is inside a dead-end branch fully on our side, else None."""
+        b = self.branch.get(q)
+        if b is None or b not in self.trap_branch:
+            return None
+        m = self.mouth.get(q)
+        if m is None or not self.home(m):
+            return None
+        return m
+
+
+def _ipos(p):
+    return (int(p[0]), int(p[1]))
+
+
+def guard_invader(agent, game_state, dpos):
+    """The invader the defender guards against, seen from defender position dpos - the same choice
+    as DefensiveReflexAgent._guard (most carried, then closest). Returns (q, hidden, carry) or None."""
+    dist = agent.get_maze_distance
+    tr = getattr(agent, 'tracker', None)
+    best, bk = None, None
+    for e in agent.get_opponents(game_state):
+        st = game_state.get_agent_state(e)
+        if not st.is_pacman:
+            continue
+        p = game_state.get_agent_position(e)
+        hidden = p is None
+        if hidden:
+            if tr is None:
+                continue
+            p = tr.most_likely(e)
+        q = _ipos(p)
+        k = (st.num_carrying, -dist(dpos, q))
+        if bk is None or k > bk:
+            bk, best = k, (q, hidden, st.num_carrying)
+    return best
+
+
+def helper_eligible(agent, game_state, geo, att_i, q, carry):
+    """Is our attacker (index att_i) a usable second jaw against an invader at q?"""
+    if not HELP_ON or att_i is None:
+        return False
+    st = game_state.get_agent_state(att_i)
+    p = game_state.get_agent_position(att_i)
+    if p is None or st.scared_timer > 0 or st.num_carrying > HELP_MAX_CARRY:
+        return False
+    m = _ipos(p)
+    dist = agent.get_maze_distance
+    if st.is_pacman:
+        if not geo.exits or min(dist(m, b) for b in geo.exits) > HELP_BORDER:
+            return False
+    if carry >= HELP_MIN_CARRY:
+        return True
+    return (not st.is_pacman) and dist(m, q) <= HELP_NEAR
+
+
+def _moves_of(game_state, geo, idx, pos):
+    try:
+        legal = game_state.get_legal_actions(idx)
+    except Exception:
+        legal = ['Stop']
+    out = []
+    for name, (dx, dy) in MOVES5:
+        if name not in legal:
+            continue
+        n = (pos[0] + dx, pos[1] + dy)
+        if n not in geo.home_set and geo.home(pos):
+            continue
+        out.append((name, n))
+    return out or [('Stop', pos)]
+
+
+def joint_cover(agent, game_state, geo, def_i, att_i, q, ex, floor):
+    """5x5 joint search over (defender move, attacker move) minimising the invader's best margin
+    over exits ex = [(cell, invader distance)]: margin = max_k min(d_def, d_att) - d_inv.
+    Returns (move for agent, margin) or (None, None)."""
+    dist = agent.get_maze_distance
+    dp = game_state.get_agent_position(def_i)
+    ap = game_state.get_agent_position(att_i)
+    if dp is None or ap is None or not ex:
+        return None, None
+    dpos, apos = _ipos(dp), _ipos(ap)
+    dm = _moves_of(game_state, geo, def_i, dpos)
+    am = _moves_of(game_state, geo, att_i, apos)
+    a_d = [[dist(o, b) for b, _ in ex] for _, o in am]
+    a_q = [dist(o, q) for _, o in am]
+    best, bv = None, None
+    me_def = agent.index == def_i
+    for dname, n in dm:
+        dn = [dist(n, b) for b, _ in ex]
+        dqn = dist(n, q)
+        for j, (aname, o) in enumerate(am):
+            ad = a_d[j]
+            margin = max(min(dn[k], ad[k]) - ex[k][1] for k in range(len(ex)))
+            if margin < floor:
+                margin = floor
+            dqo = a_q[j]
+            v = (margin, min(dqn, dqo) + 0.5 * max(dqn, dqo),
+                 1 if dname == 'Stop' else 0, 1 if aname == 'Stop' else 0, dname, aname)
+            if bv is None or v < bv:
+                bv, best = v, (dname if me_def else aname)
+    if bv is None:
+        return None, None
+    return best, bv[0]
+
+
+def trap_move(agent, game_state, geo, me, q, hidden):
+    """Dead-end mouth trap for the defender at me: invader q inside a dead-end branch wholly on our
+    side and we reach its mouth no later than it does -> hold the mouth / walk in behind it.
+    Returns an action or None."""
+    if not TRAP_ON or geo is None:
+        return None
+    dist = agent.get_maze_distance
+    m = geo.trapped_mouth(q)
+    if m is None or dist(me, m) > dist(q, m):
+        return None
+    between = geo.branch.get(me) is not None and geo.branch.get(me) == geo.branch.get(q) and \
+        dist(q, m) == dist(q, me) + dist(me, m)
+    if me == m or between:
+        if not hidden:
+            return _step_home(agent, game_state, geo, me, q)
+        return 'Stop' if me == m else _step_home(agent, game_state, geo, me, m)
+    return _step_home(agent, game_state, geo, me, m)
+
+
+def _step_home(agent, game_state, geo, me, target):
+    dist = agent.get_maze_distance
+    best, bv = None, None
+    for name, n in _moves_of(game_state, geo, agent.index, me):
+        if n not in geo.home_set:
+            continue
+        key = (dist(n, target), 1 if name == 'Stop' else 0)
+        if bv is None or key < bv:
+            bv, best = key, name
+    return best
+
+
+def guard_exits(agent, game_state, geo, q, def_scared):
+    """Exits the defender covers against an invader at q: border exits + (when awake) capsules."""
+    dist = agent.get_maze_distance
+    ex = [(b, dist(q, b)) for b in geo.exits]
+    if GUARD_CAPS and not def_scared:
+        try:
+            for c in agent.get_capsules_you_are_defending(game_state):
+                ex.append((c, dist(q, c)))
+        except Exception:
+            pass
+    return ex
+
+
+def attacker_help(agent, game_state, geo):
+    """Attacker hook: the second jaw. Returns an action or None (= normal attacker)."""
+    if not HELP_ON or geo is None:
+        return None
+    team = [i for i in agent.get_team(game_state) if i != agent.index]
+    if not team:
+        return None
+    def_i = team[0]
+    dst = game_state.get_agent_state(def_i)
+    dp = game_state.get_agent_position(def_i)
+    if dp is None or dst.is_pacman or dst.scared_timer > 0:
+        return None
+    dpos = _ipos(dp)
+    inv = guard_invader(agent, game_state, dpos)
+    if inv is None:
+        return None
+    q, hidden, carry = inv
+    if not helper_eligible(agent, game_state, geo, agent.index, q, carry):
+        return None
+    dist = agent.get_maze_distance
+    if TRAP_ON:
+        m = geo.trapped_mouth(q)
+        if m is not None and dist(dpos, m) <= dist(q, m):
+            return None   # the defender alone holds the mouth
+    ex = guard_exits(agent, game_state, geo, q, False)
+    floor = -6 if hidden else -4
+    a, margin = joint_cover(agent, game_state, geo, def_i, agent.index, q, ex, floor)
+    if a is None or margin > 0:
+        return None   # even both of us cannot cover every exit: back to work
+    return a
 
 
 #################
@@ -332,6 +587,10 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
             self.ready = True
         except Exception:
             self.ready = False
+        try:
+            self.geo = DefGeo(self, game_state)
+        except Exception:
+            self.geo = None
 
     def _precompute(self, game_state):
         walls = game_state.get_walls()
@@ -397,6 +656,13 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                     self.tracker.update(self, game_state)
                 except Exception:
                     pass
+            if HELP_ON and getattr(self, 'geo', None) is not None:
+                try:
+                    a = attacker_help(self, game_state, self.geo)
+                except Exception:
+                    a = None
+                if a is not None and a in legal:
+                    return a
             if self.ready:
                 a = self._choose(game_state)
                 if a in legal:
@@ -755,6 +1021,10 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
                         self.home_cells.add((cx, cy))
         except Exception:
             self.exits = []
+        try:
+            self.geo = DefGeo(self, game_state)
+        except Exception:
+            self.geo = None
 
     GUARD_W = 2.0
     MOVES = (('North', (0, 1)), ('South', (0, -1)), ('East', (1, 0)), ('West', (-1, 0)), ('Stop', (0, 0)))
@@ -796,6 +1066,27 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
                 ex.append((c, dist(q, c)))
         floor = -6 if hidden else -4
         scared = my_state.scared_timer > 0
+        geo = getattr(self, 'geo', None)
+        if chase and not scared and geo is not None:
+            try:
+                a = trap_move(self, game_state, geo, me, q, hidden)
+                if a is not None and a in legal:
+                    return a
+            except Exception:
+                pass
+            if HELP_ON:
+                try:
+                    team = [i for i in self.get_team(game_state) if i != self.index]
+                    carry = max(t[2] for t in invs)
+                    qc = [t[2] for t in invs if t[0] == q]
+                    carry = qc[0] if qc else carry
+                    if team and helper_eligible(self, game_state, geo, team[0], q, carry):
+                        a, margin = joint_cover(self, game_state, geo, self.index, team[0], q,
+                                                ex, floor)
+                        if a is not None and margin is not None and margin <= 0 and a in legal:
+                            return a
+                except Exception:
+                    pass
         best, bv = None, None
         for name, (dx, dy) in DefensiveReflexAgent.MOVES:
             if name not in legal:
@@ -820,6 +1111,27 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
             if bv is None or v < bv:
                 bv, best = v, name
         return best
+
+    def final(self, game_state):
+        try:
+            import os
+            path = os.environ.get('PINCER_LOG', PINCER_LOG_PATH)
+            if path:
+                conceded = sum(game_state.get_agent_state(e).num_returned
+                               for e in self.get_opponents(game_state))
+                scored = sum(game_state.get_agent_state(i).num_returned
+                             for i in self.get_team(game_state))
+                with open(path, 'a') as f:
+                    f.write('%s red=%s score=%d kills=%d conceded=%d scored=%d help=%s trap=%s\n' % (
+                        os.path.basename(os.path.dirname(os.path.abspath(__file__))), self.red,
+                        game_state.get_score(), getattr(self.tracker, 'kills', 0), conceded,
+                        scored, HELP_ON, TRAP_ON))
+        except Exception:
+            pass
+        try:
+            CaptureAgent.final(self, game_state)
+        except Exception:
+            pass
 
     def choose_action(self, game_state):
         try:
