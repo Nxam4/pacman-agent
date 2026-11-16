@@ -7,7 +7,16 @@
 # For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
 
 import random
+import heapq
 import contest.util as util
+
+DEBUG = False
+HIDDEN_W = 3.0      # soft cost per unit of hidden-defender belief proximity
+CLUSTER_W = 0.5     # bonus per neighbouring dot when choosing a food target
+CARRY_BUDGET = 12   # max path cost to the next dot when carrying nothing
+CARRY_STEP = 2      # ... shrinks by this per carried dot
+SAFE_RETURN = False  # eat a dot only if a safe way home / to a capsule exists afterwards
+INVADER_SNAP = True # at home with nothing carried: eat an invader within 3 steps
 
 from contest.capture_agents import CaptureAgent
 from contest.game import Directions
@@ -199,7 +208,7 @@ class EnemyTracker(object):
 #################
 
 def create_team(first_index, second_index, is_red,
-                first='BankingAttacker', second='DefensiveReflexAgent', num_training=0):
+                first='OffensiveReflexAgent', second='DefensiveReflexAgent', num_training=0):
     """
     This function should return a list of two agents that will form the
     team, initialized using firstIndex and secondIndex as their agent
@@ -302,6 +311,403 @@ class ReflexCaptureAgent(CaptureAgent):
 
 
 class OffensiveReflexAgent(ReflexCaptureAgent):
+    """Danger-aware attacker.  One Dijkstra per move over the maze where
+       - a cell on the enemy side is BLOCKED if a visible, active defender can reach it no later
+         than we do (so every path found is one the defender cannot intercept),
+       - hidden defenders add a soft cost from the shared EnemyTracker belief,
+    then it picks the cheapest food (cluster bonus, dead-end test), a capsule when a defender is
+    close, or the way home when carrying enough / threatened / out of time."""
+
+    def register_initial_state(self, game_state):
+        ReflexCaptureAgent.register_initial_state(self, game_state)
+        self.ready = False
+        try:
+            self.tracker = EnemyTracker.for_agent(self, game_state)
+        except Exception:
+            self.tracker = None
+        try:
+            self._precompute(game_state)
+            self.ready = True
+        except Exception:
+            self.ready = False
+
+    def _precompute(self, game_state):
+        walls = game_state.get_walls()
+        W, H = walls.width, walls.height
+        self.W, self.H = W, H
+        self.mid = W // 2
+        cells = [(x, y) for x in range(W) for y in range(H) if not walls[x][y]]
+        cset = set(cells)
+        self.nb = {}
+        for (x, y) in cells:
+            lst = []
+            for a, (dx, dy) in ((Directions.NORTH, (0, 1)), (Directions.SOUTH, (0, -1)),
+                                (Directions.EAST, (1, 0)), (Directions.WEST, (-1, 0))):
+                c = (x + dx, y + dy)
+                if c in cset:
+                    lst.append((a, c))
+            self.nb[(x, y)] = lst
+        hx = self.mid - 1 if self.red else self.mid
+        ex = self.mid if self.red else self.mid - 1
+        self.border = [(hx, y) for y in range(H) if (hx, y) in cset and (ex, y) in cset]
+        if not self.border:
+            self.border = [(hx, y) for y in range(H) if (hx, y) in cset]
+        self.enemy_cells = [c for c in cells if not self._home(c)]
+        # dead-end depth: strip leaves repeatedly; depth = distance to the remaining core
+        deg = dict((c, len(self.nb[c])) for c in cells)
+        removed = set()
+        queue = [c for c in cells if deg[c] <= 1]
+        while queue:
+            c = queue.pop()
+            if c in removed:
+                continue
+            removed.add(c)
+            for _, n in self.nb[c]:
+                if n not in removed:
+                    deg[n] -= 1
+                    if deg[n] <= 1:
+                        queue.append(n)
+        self.depth = dict((c, 0) for c in cells)
+        if len(removed) < len(cells):
+            frontier = [c for c in cells if c not in removed]
+            seen = set(frontier)
+            d = 0
+            while frontier:
+                nxt = []
+                d += 1
+                for c in frontier:
+                    for _, n in self.nb[c]:
+                        if n not in seen:
+                            seen.add(n)
+                            self.depth[n] = d
+                            nxt.append(n)
+                frontier = nxt
+
+    def _home(self, c):
+        return (c[0] < self.mid) if self.red else (c[0] >= self.mid)
+
+    # ------------------------------------------------------------------------------------
+    def choose_action(self, game_state):
+        legal = game_state.get_legal_actions(self.index)
+        try:
+            if self.tracker is not None:
+                try:
+                    self.tracker.update(self, game_state)
+                except Exception:
+                    pass
+            if self.ready:
+                a = self._choose(game_state)
+                if a in legal:
+                    return a
+        except Exception:
+            if DEBUG:
+                import traceback
+                traceback.print_exc()
+        try:
+            return ReflexCaptureAgent.choose_action(self, game_state)
+        except Exception:
+            return random.choice(legal) if legal else Directions.STOP
+
+    def _threats(self, game_state):
+        """visible: [(pos, delay)] active defenders we can see (delay = scared moves left).
+           hidden: [(pos, prob, delay)] belief cells of unseen defenders."""
+        visible, hidden = [], []
+        for e in self.get_opponents(game_state):
+            st = game_state.get_agent_state(e)
+            p = game_state.get_agent_position(e)
+            delay = int(st.scared_timer)
+            if p is not None:
+                if not st.is_pacman:
+                    visible.append(((int(p[0]), int(p[1])), delay))
+                continue
+            if st.is_pacman or self.tracker is None:
+                continue
+            b = self.tracker.belief.get(e)
+            if not b:
+                continue
+            top = sorted(b.items(), key=lambda kv: -kv[1])[:8]
+            z = sum(pr for _, pr in top)
+            if z <= 0:
+                continue
+            for c, pr in top:
+                hidden.append((c, pr / z, delay))
+        return visible, hidden
+
+    def _search(self, start, visible, soft, hard=True):
+        """Dijkstra from start. Returns (cost, steps, parent) dicts. Enemy-side cells that a visible
+        defender reaches no later than us are blocked (hard) or very expensive (not hard)."""
+        dist = self.get_maze_distance
+        home = self._home
+        cost = {start: 0.0}
+        steps = {start: 0}
+        parent = {start: None}
+        heap = [(0.0, 0, start)]
+        done = set()
+        while heap:
+            c0, t, c = heapq.heappop(heap)
+            if c in done:
+                continue
+            done.add(c)
+            t1 = t + 1
+            for _, n in self.nb[c]:
+                if n in done:
+                    continue
+                extra = 0.0
+                if not home(n):
+                    blocked = False
+                    for gp, delay in visible:
+                        dg = dist(gp, n)
+                        m = dg + delay - t1      # defender's slack: <= 0 means it gets there first
+                        if m <= 0:
+                            blocked = True
+                            if hard:
+                                break
+                            extra += 60.0 if (dg > 1 or delay > 0) else 500.0
+                        elif m <= 3:
+                            extra += (8.0, 4.0, 1.5)[m - 1]
+                    if blocked and hard:
+                        continue
+                    extra += soft.get(n, 0.0)
+                nc = c0 + 1.0 + extra
+                if n not in cost or nc < cost[n]:
+                    cost[n] = nc
+                    steps[n] = t1
+                    parent[n] = c
+                    heapq.heappush(heap, (nc, t1, n))
+        return cost, steps, parent
+
+    def _safe_return(self, src, t0, visible, caps):
+        """Champion's time-expanded safe BFS: standing on src at time t0, is there a route home
+        (or to a capsule) on which no visible defender can be at a cell by the time we are?"""
+        home = self._home
+        if home(src) or not visible:
+            return True
+        dist = self.get_maze_distance
+        seen = set([src])
+        frontier = [src]
+        t = t0
+        while frontier:
+            t += 1
+            nxt = []
+            for c in frontier:
+                for _, n in self.nb[c]:
+                    if n in seen:
+                        continue
+                    if home(n):
+                        return True
+                    bad = False
+                    for gp, delay in visible:
+                        if delay <= t and dist(gp, n) <= t:
+                            bad = True
+                            break
+                    if bad:
+                        continue
+                    if n in caps:
+                        return True
+                    seen.add(n)
+                    nxt.append(n)
+            frontier = nxt
+        return False
+
+    def _first_action(self, start, target, parent):
+        c = target
+        guard = 0
+        while parent.get(c) is not None and parent[c] != start and guard < 5000:
+            c = parent[c]
+            guard += 1
+        if parent.get(c) is None:
+            return None
+        for a, n in self.nb[start]:
+            if n == c:
+                return a
+        return None
+
+    def _choose(self, game_state):
+        dist = self.get_maze_distance
+        p = game_state.get_agent_position(self.index)
+        pos = (int(p[0]), int(p[1]))
+        st = game_state.get_agent_state(self.index)
+        carrying = st.num_carrying
+        food = self.get_food(game_state).as_list()
+        caps = list(self.get_capsules(game_state))
+        moves_left = game_state.data.timeleft // 4
+        at_home = self._home(pos)
+        visible, hidden = self._threats(game_state)
+
+        # cheap defence (from the champion): eat an invader that is right next to us
+        if INVADER_SNAP and at_home and st.scared_timer == 0 and carrying == 0:
+            best_inv, best_d = None, 4
+            for e in self.get_opponents(game_state):
+                es = game_state.get_agent_state(e)
+                ep = game_state.get_agent_position(e)
+                if ep is not None and es.is_pacman:
+                    q = (int(ep[0]), int(ep[1]))
+                    d = dist(pos, q)
+                    if d < best_d:
+                        best_inv, best_d = q, d
+            if best_inv is not None:
+                for a, n in self.nb[pos]:
+                    if self._home(n) and dist(n, best_inv) < best_d:
+                        return a
+
+        # soft danger from hidden defenders (belief mass near a cell)
+        soft = {}
+        if hidden:
+            for c in self.enemy_cells:
+                s = 0.0
+                for b, pr, delay in hidden:
+                    if delay > 8:
+                        continue
+                    d = dist(b, c)
+                    if d <= 5:
+                        s += pr * (6 - d)
+                if s > 0:
+                    soft[c] = s * HIDDEN_W
+        cost, steps, parent = self._search(pos, visible, soft, True)
+
+        d_home = 0 if at_home else min(dist(pos, b) for b in self.border)
+        near_threat = None
+        for gp, delay in visible:
+            d = dist(pos, gp)
+            if delay <= d + 2 and (near_threat is None or d < near_threat):
+                near_threat = d
+        min_delay = min([dl for _, dl in visible] + [dl for _, _, dl in hidden] + [999])
+        powered = min_delay > 3 and min_delay != 999
+
+        # ---- candidate food ------------------------------------------------------------
+        best_food, best_val, best_cost = None, None, None
+        fset = set(food)
+        cands = []
+        for f in food:
+            if f not in cost:
+                continue
+            tf = steps[f]
+            dep = self.depth.get(f, 0)
+            ok = True
+            for gp, delay in visible:
+                if dist(gp, f) + delay <= tf + 2 * dep:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            v = cost[f]
+            if dep > 0:
+                for b, pr, delay in hidden:
+                    if dist(b, f) + delay <= tf + 2 * dep:
+                        v += pr * 4.0 * dep
+            near = 0
+            for dx in (-2, -1, 0, 1, 2):
+                for dy in (-2, -1, 0, 1, 2):
+                    if (dx or dy) and (f[0] + dx, f[1] + dy) in fset:
+                        near += 1
+            v -= CLUSTER_W * min(near, 5)
+            # must still be able to walk home afterwards
+            if tf + min(dist(f, b) for b in self.border) + 2 >= moves_left:
+                continue
+            cands.append((v, f))
+        if cands:
+            cands.sort()
+            if SAFE_RETURN and visible:
+                capset = set(caps)
+                for v, f in cands[:12]:
+                    if self._safe_return(f, steps[f], visible, capset):
+                        best_food, best_val, best_cost = f, v, cost[f]
+                        break
+            else:
+                best_val, best_food = cands[0]
+                best_cost = cost[best_food]
+
+        home_cells = [b for b in self.border if b in cost]
+        best_home = min(home_cells, key=lambda b: cost[b]) if home_cells else None
+        rc = [c for c in caps if c in cost]
+        best_cap = min(rc, key=lambda c: cost[c]) if rc else None
+
+        target = None
+        if not at_home:
+            go_home = False
+            if carrying > 0:
+                if len(food) <= 2 or moves_left <= d_home + 6:
+                    go_home = True
+                elif best_food is None:
+                    go_home = True
+                elif powered:
+                    go_home = best_cost + d_home + 4 >= min_delay and best_cost > 2
+                else:
+                    budget = max(2, CARRY_BUDGET - CARRY_STEP * carrying)
+                    if near_threat is not None and near_threat <= 5:
+                        budget = min(budget, 2)
+                    if best_cost > budget:
+                        go_home = True
+            # capsule when a defender is close and awake (KNOWLEDGE 2.5)
+            if best_cap is not None and not powered and near_threat is not None and near_threat <= 6:
+                target = best_cap
+            elif go_home:
+                if best_home is not None:
+                    target = best_home
+                elif best_cap is not None:
+                    target = best_cap
+                else:
+                    return self._escape(game_state, pos, visible, soft)
+        if target is None:
+            if best_food is not None:
+                target = best_food
+            elif not at_home:
+                if best_home is not None:
+                    target = best_home
+                elif best_cap is not None:
+                    target = best_cap
+                else:
+                    return self._escape(game_state, pos, visible, soft)
+            else:
+                # at home, every food is guarded: slide along the border away from the defenders
+                if visible:
+                    cands = [b for b in self.border if b in cost]
+                    if cands:
+                        target = max(cands, key=lambda b: min(dist(b, gp) for gp, _ in visible)
+                                     - 0.3 * dist(pos, b))
+                if target is None or target == pos:
+                    return self._escape(game_state, pos, visible, soft)
+        if target == pos:
+            return Directions.STOP
+        a = self._first_action(pos, target, parent)
+        if a is None:
+            return self._escape(game_state, pos, visible, soft)
+        return a
+
+    def _escape(self, game_state, pos, visible, soft):
+        """No guaranteed-safe plan: take the least bad route home (or just keep away)."""
+        dist = self.get_maze_distance
+        if not self._home(pos):
+            cost, steps, parent = self._search(pos, visible, soft, False)
+            cands = [b for b in self.border if b in cost]
+            caps = [c for c in self.get_capsules(game_state) if c in cost]
+            tgt = None
+            if cands:
+                tgt = min(cands, key=lambda b: cost[b])
+            if caps:
+                c = min(caps, key=lambda q: cost[q])
+                if tgt is None or cost[c] < cost[tgt]:
+                    tgt = c
+            if tgt is not None and tgt != pos:
+                a = self._first_action(pos, tgt, parent)
+                if a is not None:
+                    return a
+        best, best_v = Directions.STOP, None
+        for a, n in self.nb[pos] + [(Directions.STOP, pos)]:
+            v = 0.0
+            if not self._home(n):
+                for gp, delay in visible:
+                    if delay <= 1:
+                        v += min(dist(n, gp), 8)
+                v -= 2.0 * self.depth.get(n, 0)
+            else:
+                v += 20.0
+            if best_v is None or v > best_v:
+                best, best_v = a, v
+        return best
+
+
+class _OldOffensiveReflexAgent(ReflexCaptureAgent):
     """
   A reflex agent that seeks food. This is an agent
   we give you to get an idea of what an offensive agent might look like,
@@ -324,336 +730,6 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
 
     def get_weights(self, game_state, action):
         return {'successor_score': 100, 'distance_to_food': -1}
-
-
-class BankingAttacker(ReflexCaptureAgent):
-    """Banking attacker. Plans with a time-expanded 'safe BFS': a cell on the enemy half is usable at
-    step t only if no enemy can be there by then (maze distance > t). A dot is taken only if, after
-    eating it, a safe way home (or to a capsule) still exists - this covers dead ends automatically.
-    Returns home when carrying enough, when a defender is close, or when the clock runs short."""
-
-    DIRS = (('North', (0, 1)), ('South', (0, -1)), ('East', (1, 0)), ('West', (-1, 0)))
-    CAP_FIRST = 2
-    CAP_LATER = 5
-
-    def register_initial_state(self, game_state):
-        ReflexCaptureAgent.register_initial_state(self, game_state)
-        self.ok = False
-        self.stuck = 0
-        self.banked_once = False
-        self.last_carry = 0
-        try:
-            self.tracker = EnemyTracker.for_agent(self, game_state)
-        except Exception:
-            self.tracker = None
-        try:
-            self._precompute(game_state)
-            self.ok = True
-        except Exception:
-            self.ok = False
-
-    def _precompute(self, game_state):
-        walls = game_state.get_walls()
-        W, H = walls.width, walls.height
-        cells = [(x, y) for x in range(W) for y in range(H) if not walls[x][y]]
-        cs = set(cells)
-        self.nb = {}
-        for (x, y) in cells:
-            self.nb[(x, y)] = [c for c in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)) if c in cs]
-        # all-pairs maze distances (plain dicts: fast lookups in the planner)
-        D = {}
-        nb = self.nb
-        for src in cells:
-            d = {src: 0}
-            frontier = [src]
-            k = 0
-            while frontier:
-                k += 1
-                nxt = []
-                for c in frontier:
-                    for n in nb[c]:
-                        if n not in d:
-                            d[n] = k
-                            nxt.append(n)
-                frontier = nxt
-            D[src] = d
-        self.D = D
-        mid = W // 2
-        if self.red:
-            self.home = set(c for c in cells if c[0] < mid)
-            bx = mid - 1
-        else:
-            self.home = set(c for c in cells if c[0] >= mid)
-            bx = mid
-        self.border = [c for c in cells if c[0] == bx and
-                       any(n not in self.home for n in nb[c])]
-        if not self.border:
-            self.border = [c for c in cells if c[0] == bx]
-        self.home_dist = {}
-        for c in cells:
-            ds = [D[c][b] for b in self.border if b in D[c]]
-            self.home_dist[c] = min(ds) if ds else 999
-
-    # ------------------------------------------------------------------------------------
-    def choose_action(self, game_state):
-        legal = game_state.get_legal_actions(self.index)
-        try:
-            if self.tracker is not None:
-                try:
-                    self.tracker.update(self, game_state)
-                except Exception:
-                    pass
-            if self.ok:
-                act = self._plan(game_state, legal)
-                if act in legal:
-                    return act
-        except Exception:
-            pass
-        try:
-            return ReflexCaptureAgent.choose_action(self, game_state)
-        except Exception:
-            return legal[0] if legal else Directions.STOP
-
-    def _ipos(self, p):
-        return (int(p[0]), int(p[1]))
-
-    def _step_to(self, me, cell, legal):
-        for name, (dx, dy) in self.DIRS:
-            if (me[0] + dx, me[1] + dy) == cell and name in legal:
-                return name
-        return None
-
-    def _toward(self, me, target, legal):
-        """Greedy step along a shortest path to target."""
-        best, bd = None, 99999
-        row = self.D[target]
-        for n in self.nb[me]:
-            d = row.get(n, 9999)
-            if d < bd:
-                bd, best = d, n
-        if best is None:
-            return None
-        return self._step_to(me, best, legal)
-
-    def _safe_bfs(self, sources, t0, threats, goal=None):
-        """Time-expanded BFS. sources: cells entered at time t0. threats: list of
-        (dist_row, slack, scared). A non-home cell c is unsafe at time t if for some threat
-        dist_row[c] + slack <= t and scared <= t. Returns (time, parent) dicts, or - when goal is
-        given (a set of cells) - True/False for 'a goal cell is reachable'."""
-        home = self.home
-        nb = self.nb
-        tm = {}
-        par = {}
-        for s in sources:
-            tm[s] = t0
-            par[s] = None
-            if goal is not None and (s in home or s in goal):
-                return True
-        frontier = list(sources)
-        t = t0
-        while frontier:
-            t += 1
-            nxt = []
-            for c in frontier:
-                for n in nb[c]:
-                    if n in tm:
-                        continue
-                    if n not in home:
-                        bad = False
-                        for row, slack, scared in threats:
-                            if scared <= t and row.get(n, 999) + slack <= t:
-                                bad = True
-                                break
-                        if bad:
-                            continue
-                    elif goal is not None:
-                        return True
-                    tm[n] = t
-                    par[n] = c
-                    if goal is not None and n in goal:
-                        return True
-                    nxt.append(n)
-            frontier = nxt
-        if goal is not None:
-            return False
-        return tm, par
-
-    def _plan(self, game_state, legal):
-        D, home = self.D, self.home
-        st = game_state.get_agent_state(self.index)
-        me = self._ipos(st.get_position())
-        if me not in D:
-            return None
-        carried = st.num_carrying
-        if carried < self.last_carry and me in home:
-            self.banked_once = True
-        if carried > self.last_carry:
-            self.stuck = 0
-        self.last_carry = carried
-        at_home = me in home
-        foods = self.get_food(game_state).as_list()
-        capsules = list(self.get_capsules(game_state))
-        moves_left = game_state.data.timeleft // 4
-
-        # ---- threats: every enemy, visible or believed ------------------------------------
-        slack_all = min(4, self.stuck // 8)
-        threats = []
-        vis_ghost_d = 999      # nearest visible, unscared enemy ghost
-        invaders = []
-        for e in self.get_opponents(game_state):
-            es = game_state.get_agent_state(e)
-            p = es.get_position()
-            hidden = p is None
-            if hidden:
-                if self.tracker is None:
-                    continue
-                p = self.tracker.most_likely(e)
-            p = self._ipos(p)
-            if p not in D:
-                continue
-            scared = es.scared_timer if not es.is_pacman else 0
-            threats.append((D[p], slack_all, scared))
-            if not hidden:
-                if es.is_pacman:
-                    invaders.append(p)
-                elif scared <= 2:
-                    vis_ghost_d = min(vis_ghost_d, D[p].get(me, 999))
-
-        # ---- cheap defence: eat an invader that is right next to us -----------------------
-        if at_home and st.scared_timer == 0 and invaders and carried == 0:
-            tgt = min(invaders, key=lambda q: D[me].get(q, 999))
-            if D[me].get(tgt, 999) <= 3:
-                a = self._toward(me, tgt, legal)
-                if a:
-                    return a
-
-        # ---- search ----------------------------------------------------------------------
-        if at_home:
-            srcs = sorted(self.border, key=lambda b: D[me].get(b, 999))
-            tm, par = self._safe_bfs(srcs, 0, threats)
-        else:
-            tm, par = self._safe_bfs([me], 0, threats)
-
-        def origin(c):
-            while par.get(c) is not None:
-                c = par[c]
-            return c
-
-        def cost(c):
-            if at_home:
-                return D[me].get(origin(c), 999) + tm[c]
-            return tm[c]
-
-        def first_step(c):
-            """Action that starts the planned route to c."""
-            path = [c]
-            while par.get(path[-1]) is not None:
-                path.append(par[path[-1]])
-            src = path[-1]
-            if at_home and src != me:
-                return self._toward(me, src, legal)
-            if len(path) >= 2:
-                return self._step_to(me, path[-2], legal)
-            return None
-
-        cap_set = set(capsules)
-
-        # ---- decide: go home or eat more ---------------------------------------------------
-        hd = self.home_dist.get(me, 0)
-        go_home = False
-        if carried > 0:
-            if len(foods) <= 2:
-                go_home = True
-            elif hd + 4 >= moves_left:
-                go_home = True
-            else:
-                all_scared = bool(threats) and min(t[2] for t in threats) > hd + 6
-                if all_scared:
-                    cap = 99
-                elif not self.banked_once and self.get_score(game_state) <= 0:
-                    cap = self.CAP_FIRST
-                else:
-                    cap = self.CAP_LATER
-                if vis_ghost_d <= 5:
-                    cap = 1
-                if carried >= cap:
-                    go_home = True
-        elif len(foods) <= 2:
-            go_home = True
-
-        target = None
-        if not (go_home and at_home):
-            cand = sorted((f for f in foods if f in tm and f not in home), key=cost)
-            tried = 0
-            for f in cand:
-                if go_home and tm[f] > 2:   # heading home: only grab dots that are almost free
-                    break
-                tried += 1
-                if tried > 12:
-                    break
-                if self._safe_bfs([f], tm[f], threats, goal=cap_set):
-                    target = f
-                    break
-            # a capsule is worth it when a defender is around or we are stalemated
-            if not go_home and (target is None or vis_ghost_d <= 6):
-                cc = [c for c in capsules if c in tm]
-                if cc:
-                    c = min(cc, key=cost)
-                    if target is None or cost(c) <= cost(target) + 4:
-                        target = c
-
-        if target is not None:
-            a = first_step(target)
-            if a:
-                return a
-
-        # ---- no target -------------------------------------------------------------------
-        if not at_home:
-            # run home (or to a capsule) along a safe route
-            goals = [c for c in tm if c in home or c in cap_set]
-            if goals:
-                g = min(goals, key=lambda c: (tm[c], 0 if c in home else 1))
-                a = first_step(g)
-                if a:
-                    return a
-            # nothing provably safe: keep away from enemies while drifting home
-            best, bv = None, -99999
-            for n in self.nb[me]:
-                gd = 999
-                for row, slack, scared in threats:
-                    if scared <= 1:
-                        gd = min(gd, row.get(n, 999))
-                v = min(gd, 4) * 100 - self.home_dist.get(n, 0) * 3 + len(self.nb[n])
-                if gd <= 1:
-                    v -= 1000
-                if n in home:
-                    v += 500
-                if v > bv:
-                    bv, best = v, n
-            if best is not None:
-                a = self._step_to(me, best, legal)
-                if a:
-                    return a
-            return None
-
-        # at home with nothing safe to take: stalemate. Slide along the border to the entry the
-        # enemies are farthest from; 'stuck' slowly relaxes the safety test.
-        if len(foods) <= 2 or go_home:
-            return Directions.STOP if Directions.STOP in legal else None
-        self.stuck += 1
-        best, bv = None, -99999
-        for b in self.border:
-            gd = 999
-            for row, slack, scared in threats:
-                if scared <= 1:
-                    gd = min(gd, row.get(b, 999))
-            fd = min(D[b].get(f, 999) for f in foods) if foods else 0
-            v = min(gd, 12) * 3 - fd - 0.3 * D[me].get(b, 999)
-            if v > bv:
-                bv, best = v, b
-        if best is not None and best != me:
-            return self._toward(me, best, legal)
-        return Directions.STOP if Directions.STOP in legal else None
 
 
 class DefensiveReflexAgent(ReflexCaptureAgent):
