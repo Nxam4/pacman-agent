@@ -10,13 +10,38 @@ return by nearest-neighbour chaining when no visible ghost within `ROUTE_GHOST`)
 scales, ROUTE_K 8, ROUTE_FIRST 5, HELP_MAX_CARRY 0, HELP_BORDER 4). Past programs:
 `arena/db/progs/<id>.py`; frozen champions `arena/opponents/champ_rNN` = champion at the START of round
 NN (champ_r09t = r08cand2, champ_r08 = r06cand3). The tuned champion is the gate opponent.
-Tune gate: 71.7% in 60 vs r08cand2; regress 85% (champ_r06 66.7%, ext_rush 75%). Rounds 9-10: nothing promoted.
+Tune gate: 71.7% in 60 vs r08cand2; regress 85% (champ_r06 66.7%, ext_rush 75%). Rounds 9-11: nothing promoted.
+
+## Round 11 (all three from tune_1117_1652; one near-miss)
+- **Home intercept (r11cand1, `INTERCEPT_*`): inconclusive, 53.3% in 300 (LLR +1.30, peak +2.42 at
+  240)** - the best candidate since the tune. An agent already home as a ghost carrying 0 runs
+  `_guard` on the top enemy carrier (carry >= 6) when its solo cover margin <= 1, for <= 40 moves.
+  Fires in only ~18% of games, but kills concentrate there (~0.6/game vs ~0.04 elsewhere); office red
+  7-0-5 +29.8 with 1.42 kills/game (r10: office lost). Many intercepts seal the carrier without
+  catching it (it waits) and burn 40 of our moves. Its builder's next ideas: count only REAL crossings
+  as exits (raises trigger rate), end on "distance not shrinking", teammate jaw while it is home.
+- **diana_catana is a RUSHER we lose a RACE to (r11cand2 log, 16 games):** both its agents go Pacman
+  at once, we double-attack with nobody home, it reaches "all but 2" first (our deaths = 0: offence
+  is fine). An ALARM (lane 0 goes home while enemies carry >= 5 in total) beat diana 68.8-75% vs 62.5%
+  and the field 90.6% vs 82.3% (4 games/team), but **lost the mirror 33.6% in 64**: the mirror
+  carries 20-70 deep all game, so the alarm fires every game and costs an attacker (bank 20.5 vs 29).
+  An alarm needs a trigger that the mirror does not hit (race-aware, see directions).
+- **`_guard` parks on one border cell (bug, r11cand2):** with a deep invader no cell covers every exit
+  (margin > 0 everywhere), so it sits at the minimax cell for 300 moves while carriers walk out 2 cells
+  away. GUARD_INTERCEPT (margin > 0 -> rank by distance to invader first) alone: **rejected, 49.1% in
+  110** - neutral in the mirror (turtle phase is rare there); untested on the field.
+- **Load-scaled danger (r11cand3): rejected.** Danger costs x (1 + 0.03*carry): 46.5% in 72 (bank 25.9:
+  global caution costs bank, like r07cand1). Only above 20 carried (LOAD_FREE): 43.3% in 30.
+  Office facts: NO capsules; rooms are wide single-door (leaf `depth` = 0 inside); the -127 games
+  die carrying 62-69, sandwiched by two ghosts or by a just-crossed unseen ghost; ROUTE was off.
+- Colour bias unchanged in r11cand1's 300 games (crowded R 0-0-11, strategic R 1-0-11, alley B
+  2-0-10); RANDOM 57-14-49 and office/jumbo are where changes show.
 
 ## Standing facts
 - **The mirror over-states progress.** Held-out benchmark (arena/ext_pool, 240 paired games): tuned
   champion 89.2% vs r08cand2 88.8%, paired +0.4 +- 2.6, despite 71.7% head-to-head. Weakest held-out
   opponents: ylmiami 68.8% (7 losses), uripont 81%, rashomonset 83%. Training field: ext_gh_diana_catana
-  is the one field team near 50% (4-0-4 and 3-0-5 in two r10 builder runs); the rest >= 75%.
+  is the one field team near 50% (4-0-4, 3-0-5, 4-0-4, 10-0-6 in builder runs); the rest >= 75%.
 - **EnemyTracker works** (inside my_team.py): best guess off by 3.2 cells on average, true cell in
   the belief 98.5% of the time, ~0.4 ms per update.
 - **Builders' own numbers do not replicate, in either direction:** champion vs itself 41.7-54.2%;
@@ -35,33 +60,18 @@ Tune gate: 71.7% in 60 vs r08cand2; regress 85% (champ_r06 66.7%, ext_rush 75%).
 - Timing: gate games 3-24 s wall-clock, no warning in ~1500 gate games. A 150-playout defender
   search hit 0.26-0.30 s per move (r06cand2); r10cand2's 0.2 s budget peaked at 0.243 s.
 
-## Round 10 (all three from tune_1117_1652; all rejected)
-- **Ties are now rare under the tuned champion: 9 of 230 gate games (4%)**, down from ~14% in r09.
-  The standoff lever is small.
-- **Standoff cause logged (r10cand1):** on fast, neither side's attackers ever became Pacman in 600
-  moves. The enemy attacker hovers as a ghost 0-1 cells from its border, so every lane dot counts as
-  guarded; our agent steps up, sees it, steps back, loses sight, steps up: a deterministic 2-cycle on
-  both sides. HOVER_ON (a hovering ghost far from us becomes a soft cost, not a threat) was **rejected,
-  47.5% in 80**, bank 27.9 / conc 31.6: it cost bank elsewhere. If retried: a livelock breaker that
-  fires only after our own position 2-cycles >= 8 moves at home carrying 0, small maps only.
-- **Joint defence playout search (r10cand2): rejected, 49.2% in 60 - a NO-OP.** It ran 26 times in
-  100 games and never kept the helper in. The trigger (turtle phase AND chased invader AND
-  `helper_eligible` AND joint margin 1-4) happens ~0.25 times/game. Defence search is NOT the lever
-  while the trigger is this rare; `helper_eligible` blocks most chases in field games.
-- **Border ambush exploiter (r10cand3): rejected, 46.7% in 90.** The champion's carrier does not go
-  home near the border: it eats deep in our half carrying 20-70 dots on big maps (CARRY_STEP 0), and
-  its crossing (min-cost border cell) moves, so a Pacman waiting at one gap rarely strikes (8-11 waits,
-  0-1 strikes/game). Wide trigger: kills 0.47/game but 40%. The weakness is the unbounded deep carry
-  with nobody at home - a ghost that covers ALL exits (`_guard` margin <= 0) is the untried angle.
-
-## Round 9 (from r08cand2; all rejected)
-- **Border ambush on crowded red:** our carrier 1 step from home is eaten by an ENEMY PACMAN that steps
-  back over the border and becomes a ghost at the shared middle gap. `_threats` ignores visible enemy
-  Pacmen. Still present: crowded red conc 62 / drop 32 per game in r10.
-- r09cand1 LATENT_D (every visible enemy Pacman within 3.5 cols of the border = ghost): 45.0% in 130;
-  office red 0-0-6, drop 74/game. If retried: only food-carrying enemy Pacmen adjacent to the border,
-  soft cost, office drop must not rise.
-- Settled: SMALLMAP guard from move 0 (r09cand2, 49.7% in 190); late or sticky turtle (r09cand3, 49.6%).
+## Rounds 9-10, condensed (all rejected)
+- **Fast/default standoff (r10cand1):** a deterministic 2-cycle - the enemy attacker hovers as a ghost
+  0-1 cells from its border, our agent steps up, sees it, steps back, loses sight. HOVER_ON (hovering
+  ghost = soft cost) 47.5% in 80, cost bank elsewhere. Ties are rare now (4% of gate games).
+- **Joint defence playout search (r10cand2): 49.2% in 60, a NO-OP** - its trigger (turtle AND chased
+  invader AND `helper_eligible` AND margin 1-4) happens ~0.25 times/game.
+- **Border-gap ambush (r10cand3): 46.7% in 90.** The champion's carrier eats deep carrying 20-70
+  (CARRY_STEP 0) and its crossing moves, so waiting at one gap rarely strikes.
+- **Crowded red border ambush (r09):** our carrier 1 step from home is eaten by an ENEMY PACMAN that
+  steps back over the border and becomes a ghost. r09cand1 LATENT_D (every enemy Pacman within 3.5
+  cols = ghost, hard): 45.0% in 130, office red drop 74/game. If retried: narrow and soft only.
+- Settled: SMALLMAP guard from move 0 (49.7% in 190); late or sticky turtle (49.6%).
 
 ## Rounds 6-8, condensed
 - r08cand2 ROUTE_ON promoted, 57.9% in 170 vs r06cand3: jumbo +20, office +9.8, drops 3.0/game vs 5.2.
@@ -89,15 +99,17 @@ Tune gate: 71.7% in 60 vs r08cand2; regress 85% (champ_r06 66.7%, ext_rush 75%).
   Trip ordering (ROUTE_ON) beat greedy one-dot choice.
 
 ## Known failure patterns
-- **officeCapture**: the most dots die there (r10 drop 14/game blue, 34/game red; deaths 0.4-0.9).
-- **crowdedCapture red**: border ambush, -50/game in the mirror.
+- **officeCapture**: the most dots die there (r11 drop 24/game red; one 60+ load decides the game).
+- **crowdedCapture red**: border ambush, -36..-50/game in the mirror (r11: 0-0-11, drop 33).
+- **Rushers (diana_catana)**: we lose the race, not the fights - nobody home while lead < 3.
 - **Big maps are decided by one load**: jumbo swings -128..+128 on one seed.
 - **fast/default standoff**: mutual ghost-hover 2-cycle (r10cand1); rare as ties now.
 
 ## Open questions (untested)
-- Why diana_catana (training field) and ylmiami (held-out) beat us: log bank/conc/deaths per layout.
-- Home intercept: an agent already home with carry 0 cutting off a deep enemy carrier (`_guard` <= 0).
-- Office deaths: which situation kills the carrier (log it first).
+- An alarm trigger that fires vs rushers (diana) but not vs the deep-carrying mirror.
+- `_guard` exits = real crossings only (reachable without passing our ghost): untested, also the
+  likely cure for the parking bug.
+- Office sandwich in single-door rooms: a room-door (articulation) depth instead of leaf depth.
 - Shared routes between the two attackers on big maps.
 - Process: same-seed parent control + per-flag ablation is the standard; log layout AND colour next
   to kills / conceded / banked.
