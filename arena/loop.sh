@@ -60,6 +60,14 @@ command -v timeout >/dev/null || die "coreutils 'timeout' missing"
 $PY -c 'import sys; assert sys.version_info[:2] == (3, 8), sys.version' 2>/dev/null \
   || die "$PY is not Python 3.8 - run 'source venv/bin/activate' first"
 $PY -c 'import contest' 2>/dev/null || die "contest package not installed in this venv"
+# The loop has priority over the SPSA tuner (both use every core: together, slow moves become
+# timeout warnings). Ctrl-C the tuner: it saves its state and can be resumed with --resume.
+if pgrep -f "arena/tune.py" >/dev/null; then
+  echo ">>> SPSA tuner is running - stopping it (state saved; resume: python3 arena/tune.py --resume ...)"
+  pkill -INT -f "arena/tune.py" || true
+  for _ in $(seq 1 60); do pgrep -f "arena/tune.py" >/dev/null || break; sleep 5; done
+  pgrep -f "arena/tune.py" >/dev/null && die "tuner did not stop - kill it first (pkill -f arena/tune.py)"
+fi
 GIT=(git -c core.autocrlf=input)      # repo is shared with Windows; never commit CRLF from WSL
 HAVE_GIT=0
 if git rev-parse --git-dir >/dev/null 2>&1; then
