@@ -34,9 +34,13 @@ FIXED_LAYOUTS = ["defaultCapture", "alleyCapture", "jumboCapture", "officeCaptur
 HARNESS_TIMEOUT = 1500
 
 
+RUN_GAME = os.path.join(ROOT, "arena", "run_game.py")   # capture.py + per-game play statistics
+CHAMPION = os.path.join(ROOT, "my_team.py")
+
+
 def play(red, blue, layout, game_id, workdir, python):
-    """Play one game. Returns dict with red-perspective score and problems."""
-    cmd = [python, "capture.py", "-r", red, "-b", blue, "-l", layout, "-q", "-c",
+    """Play one game. Returns dict with red-perspective score, problems and play statistics."""
+    cmd = [python, RUN_GAME, "-r", red, "-b", blue, "-l", layout, "-q", "-c",
            "--delay-step", "0", "-u", "arena", "-m", str(game_id)]
     t0 = time.time()
     try:
@@ -55,6 +59,12 @@ def play(red, blue, layout, game_id, workdir, python):
         score = g[3] if g[4] == "Red" else (-g[3] if g[4] == "Blue" else 0)
     except Exception:
         pass
+    stats = None
+    try:
+        with open(score_file[:-5] + "_stats.json") as f:
+            stats = json.load(f)
+    except Exception:
+        pass
     problems = {
         "red_crash": "Red agent crashed" in out,
         "blue_crash": "Blue agent crashed" in out,
@@ -66,41 +76,54 @@ def play(red, blue, layout, game_id, workdir, python):
         "load_error": "could not be loaded" in out,
     }
     res = {"layout": layout, "score": score if score is not None else 0,
-           "secs": round(time.time() - t0, 1), **problems}
+           "secs": round(time.time() - t0, 1), "stats": stats, **problems}
     if score is None:
         res["error"] = out[-1500:]
     return res
 
 
-def run(candidate, opponents, games_per_opp, seed, workers, python):
-    rng = random.Random(seed)
-    jobs = []
+def opp_label(opp):
+    if opp == BASELINE:
+        return "baseline"
+    if opp == CHAMPION:
+        return "champion"
+    return os.path.relpath(os.path.dirname(opp), ROOT)
+
+
+def pair_layout(p, seed, rng):
+    """Layout of game pair p: alternate a fixed layout (cycling through all of them) and a random one."""
+    return (FIXED_LAYOUTS[(p // 2 + seed) % len(FIXED_LAYOUTS)] if p % 2 == 0
+            else f"RANDOM{rng.randint(1, 10**6)}")
+
+
+def play_stats(r, cand_is_red):
+    """Candidate-perspective play statistics of one game (None if the wrapper wrote none)."""
+    s = r.get("stats")
+    if not s:
+        return None
+    me, op = ((0, 2), (1, 3)) if cand_is_red else ((1, 3), (0, 2))
+    tot = lambda k, idx: sum(s.get(k, [0, 0, 0, 0])[i] for i in idx)
+    return {"banked": tot("returned", me), "conceded": tot("returned", op),
+            "deaths": tot("deaths", me), "dropped": tot("dropped", me),
+            "kills": tot("deaths", op), "opp_dropped": tot("dropped", op)}
+
+
+def run_jobs(jobs, workers, python):
+    """jobs: (candidate, opponent, cand_is_red, layout, gid). Plays them in parallel, one subprocess
+    and one scratch dir per game. Returns results in job order, from the candidate's perspective."""
     # Each game needs its own working dir because capture.py writes www/... relative to cwd.
     tmp_root = tempfile.mkdtemp(prefix="arena_")
-    gid = 0
-    for opp in opponents:
-        # Games come in colour-swapped pairs on the same layout (cancels map/colour asymmetry).
-        # Pairs alternate fixed layout / random layout, cycling through ALL fixed layouts.
-        layout = None
-        for i in range(games_per_opp):
-            p = i // 2
-            if i % 2 == 0:
-                layout = (FIXED_LAYOUTS[(p // 2 + seed) % len(FIXED_LAYOUTS)] if p % 2 == 0
-                          else f"RANDOM{rng.randint(1, 10**6)}")
-            cand_is_red = i % 2 == 0
-            red, blue = (candidate, opp) if cand_is_red else (opp, candidate)
-            jobs.append((opp, cand_is_red, red, blue, layout, gid))
-            gid += 1
 
     def job(j):
-        opp, cand_is_red, red, blue, layout, gid = j
+        cand, opp, cand_is_red, layout, gid = j
+        red, blue = (cand, opp) if cand_is_red else (opp, cand)
         wd = os.path.join(tmp_root, f"g{gid}")
         os.makedirs(wd)
         # capture.py must run from the contest dir for its imports; copy-free: symlink files
         for name in os.listdir(CONTEST_DIR):
             os.symlink(os.path.join(CONTEST_DIR, name), os.path.join(wd, name))
         r = play(red, blue, layout, gid, wd, python)
-        r["opponent"] = "baseline" if opp == BASELINE else os.path.relpath(os.path.dirname(opp), ROOT)
+        r["opponent"] = opp_label(opp)
         r["cand_red"] = cand_is_red
         r["cand_score"] = r["score"] if cand_is_red else -r["score"]
         cand_idx = {0, 2} if cand_is_red else {1, 3}
@@ -108,15 +131,32 @@ def run(candidate, opponents, games_per_opp, seed, workers, python):
         r["cand_timeouts"] = sum(1 for a in r["timeout_warnings"] if a in cand_idx)
         r["cand_forfeit"] = any(a in cand_idx for a in r.get("forfeits", []))
         r["no_score"] = "error" in r   # harness timeout / unparseable game
+        r["play"] = play_stats(r, cand_is_red)
+        r.pop("stats", None)
         shutil.rmtree(wd, ignore_errors=True)
         return r
 
     try:
         with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(job, jobs))
+            return list(ex.map(job, jobs))
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
-    return results
+
+
+def run(candidate, opponents, games_per_opp, seed, workers, python):
+    rng = random.Random(seed)
+    jobs = []
+    gid = 0
+    for opp in opponents:
+        # Games come in colour-swapped pairs on the same layout (cancels map/colour asymmetry).
+        # Pairs alternate fixed layout / random layout, cycling through ALL fixed layouts.
+        layout = None
+        for i in range(games_per_opp):
+            if i % 2 == 0:
+                layout = pair_layout(i // 2, seed, rng)
+            jobs.append((candidate, opp, i % 2 == 0, layout, gid))
+            gid += 1
+    return run_jobs(jobs, workers, python)
 
 
 def summarise(results):
@@ -145,7 +185,24 @@ def summarise(results):
         # symmetric score (win 1, tie 0.5): 50 = equal strength, independent of the tie rate
         s["score_pct"] = round(100 * (s["wins"] + 0.5 * s["ties"]) / s["games"], 1) if s["games"] else 0
         s["avg_score"] = round(s["score_sum"] / s["games"], 2) if s["games"] else 0
+    for name, s in list(by_opp.items()) + [("TOTAL", total)]:
+        s["play"] = play_summary([r for r in results if name == "TOTAL" or r["opponent"] == name])
     return {"by_opponent": by_opp, "total": total}
+
+
+PLAY_KEYS = ("banked", "conceded", "deaths", "dropped", "kills")
+
+
+def play_summary(results):
+    """Per-game averages of how the candidate played (food banked / conceded, deaths, food dropped on
+    death, kills) plus the share of games in which it died carrying >= 5 dots."""
+    ps = [r["play"] for r in results if r.get("play")]
+    if not ps:
+        return None
+    out = {k: round(sum(p[k] for p in ps) / len(ps), 2) for k in PLAY_KEYS}
+    out["big_drop_pct"] = round(100 * sum(1 for p in ps if p["dropped"] >= 5) / len(ps), 1)
+    out["games"] = len(ps)
+    return out
 
 
 # ------------------------------------------------------------------ SPRT
@@ -182,6 +239,8 @@ def run_sprt(cand, opp, a):
         if n <= 0:
             break
         res = run(cand, [opp], n, a.seed + 7919 * k, a.workers, a.python)
+        for r in res:   # gids restart per batch; keep them unique within the report
+            r["batch"] = k
         k += 1
         results += res
         if any(r["cand_crash"] or r["cand_forfeit"] or r["cand_timeouts"] or r["no_score"] for r in res):
@@ -217,10 +276,10 @@ def main():
     sp = ap.add_argument_group("SPRT (sequential test vs ONE opponent, e.g. --opponents my_team.py --sprt)")
     sp.add_argument("--sprt", action="store_true", help="play until statistically decided")
     sp.add_argument("--s0", type=float, default=0.50, help="H0 expected score per game (win 1, tie .5)")
-    sp.add_argument("--s1", type=float, default=0.60, help="H1 expected score per game")
+    sp.add_argument("--s1", type=float, default=0.55, help="H1 expected score per game")
     sp.add_argument("--alpha", type=float, default=0.05, help="P(accept H1 | H0 true)")
     sp.add_argument("--beta", type=float, default=0.10, help="P(accept H0 | H1 true)")
-    sp.add_argument("--max-games", type=int, default=120)
+    sp.add_argument("--max-games", type=int, default=300)
     # min 8 pairs + variance floor 0.02 keep false promotions of an equal candidate at ~5% (simulated;
     # with 4 pairs / 0.01 the small-sample variance estimate let it reach ~8%)
     sp.add_argument("--min-pairs", type=int, default=8)
@@ -241,11 +300,16 @@ def main():
     summary = summarise(results)
 
     print(f"{'opponent':<28}{'W':>4}{'T':>4}{'L':>4}{'pts%':>7}{'score%':>7}{'avg':>7}{'crash':>7}"
-          f"{'slow':>6}{'forfeit':>8}{'maxs':>6}")
+          f"{'slow':>6}{'forfeit':>8}{'maxs':>6} | {'bank':>5}{'conc':>5}{'died':>5}{'drop':>5}{'kill':>5}")
     rows = list(summary["by_opponent"].items()) + [("TOTAL", summary["total"])]
     for name, s in rows:
+        pl = s.get("play") or {}
+        ps = "".join(f"{pl.get(k, '-'):>5}" for k in PLAY_KEYS)
         print(f"{name:<28}{s['wins']:>4}{s['ties']:>4}{s['losses']:>4}{s['points_pct']:>7}{s['score_pct']:>7}"
-              f"{s['avg_score']:>7}{s['crashes']:>7}{s['timeouts']:>6}{s['forfeits']:>8}{int(s['max_secs']):>6}")
+              f"{s['avg_score']:>7}{s['crashes']:>7}{s['timeouts']:>6}{s['forfeits']:>8}{int(s['max_secs']):>6}"
+              f" | {ps}")
+    print("  (per game: bank = food we returned, conc = food the opponent returned, died = our Pacman "
+          "deaths, drop = food we dropped dying, kill = opponent Pacmen we ate; maxs = longest game in s)")
     if sprt:
         verdict = {"H1": "BETTER (H1 accepted)", "H0": "not better (H0 accepted)",
                    "inconclusive": "inconclusive (max games reached)",

@@ -8,9 +8,17 @@ unclean (crash or timeout during the SPRT) / rejected (SPRT vs champion accepted
 inconclusive (SPRT hit its game limit - a near-miss if its score is above 52%) / regress_fail (better
 than the champion but collapsed vs the baseline or an older champion, see regress.txt) / not_chosen
 (qualified, another candidate scored higher) / passed (the winner). sprt.txt shows the sequential
-test (score% with win 1 / tie 0.5, 50 = equal; LLR trajectory); the json files hold per-game
-layouts and scores. SPRT results are reliable (~5% false positives); builders' own --quick numbers
-are not.
+test (score% with win 1 / tie 0.5, 50 = equal; LLR trajectory, bounds [50%, 55%]); the json files
+hold per-game layouts, scores and a "play" record per game (candidate's view: banked = food it
+returned, conceded = food the opponent returned, deaths = its Pacman deaths, dropped = food lost on
+those deaths, kills = enemy Pacmen eaten); the tables' right-hand columns average them. Use these to
+explain WHY games are lost (e.g. "dies carrying 6+ dots on fastCapture", "concedes 10 dots per game
+to two invaders") - that makes far better directions than win/loss alone. SPRT results are reliable
+(~5% false positives); builders' own --quick numbers are not.
+League: arena/opponents/exploit_rNN are exploiters (area EXPLOIT, prompts/exploiter.md) that beat a
+champion - their NOTES.md say which weakness they used; arena/opponents/ext_* are external-style
+teams. Every candidate's regression stage plays them. A weakness an exploiter found deserves a
+direction until the champion holds up against it.
 All past programs and their scores are in arena/db/programs.jsonl (later lines override earlier ones
 with the same id). Builder transcripts are in arena/logs/. Research digest: arena/KNOWLEDGE.md.
 Promoted this round: {{WINNER}}
@@ -33,3 +41,11 @@ Do two things, then stop. Do not edit any my_team.py.
    round automatically continues that program with its own direction (your last line is not used).
    Use arena/KNOWLEDGE.md: ideas there with large measured effects (strategic playouts, pincer
    defence) deserve priority until our own measurements say otherwise.
+   Each line should be ONE focused idea a builder can implement as a small change in ~45 minutes
+   (big rewrites lost in round 3). Do not write directions that only change constants: top-level
+   NAME = number lines are tuned automatically by arena/tune.py (SPSA).
+   If a candidate qualified but was not chosen (not_chosen), consider a line that ports its idea
+   onto the new champion.
+   Every few rounds the last builder is an exploiter (its only goal: beat the champion). You may
+   steer it with ONE extra line starting with "EXPLOIT:" (e.g. a weakness you suspect); such a
+   line is never given to a normal builder.

@@ -20,8 +20,10 @@ same id), arena/db/progs/<id>.py, arena/db/champion.txt.
            [--smoke J] [--sprt J] [--regress J] [--notes NOTES.md]
   db.py promote ID
   db.py info ID FIELD                                  -> prints one field of a record
+  db.py tag ID KEY VALUE                               -> set one field (e.g. frozen = opponent dir)
+  db.py last-round                                     -> highest round number in the database
   db.py context PARENT_ID AREA OUT_FILE [--k 3]
-  db.py focus-status MIN_BASELINE STALL                -> "keep" or "release: <reason>"
+  db.py focus-status STALL [MIN_ROUNDS]                -> "keep" or "release: <reason>"
 
 Statuses: unchanged, invalid, smoke_fail, unclean (crash/timeout during SPRT), rejected (SPRT H0),
 inconclusive (SPRT ran out of games), regress_fail, not_chosen (passed, another was better),
@@ -98,6 +100,9 @@ def metrics(path):
          "by_opponent": dict((k, v.get("score_pct")) for k, v in s["by_opponent"].items()),
          "lost": sorted({"%s@%s" % (g["opponent"], g["layout"]) for g in rep.get("games", [])
                          if g.get("cand_score", 0) < 0})[:40]}
+    if t.get("play"):   # how it played (arena/run_game.py): per-game averages
+        m["play"] = t["play"]
+        m["play_by_opponent"] = dict((k, v.get("play")) for k, v in s["by_opponent"].items())
     if rep.get("sprt"):
         sp = rep["sprt"]
         m["sprt"] = {"decision": sp.get("decision"), "score_pct": round(100 * sp.get("score", 0), 1),
@@ -124,6 +129,15 @@ def head(path, n=14):
         return ""
 
 
+def fmt_play(p):
+    if not p:
+        return ""
+    return ("per game: banked %s, conceded %s, our deaths %s (dropping %s dots), kills %s; "
+            "dropped >= 5 dots in %s%% of games"
+            % (p.get("banked"), p.get("conceded"), p.get("deaths"), p.get("dropped"), p.get("kills"),
+               p.get("big_drop_pct")))
+
+
 def fmt(r):
     parts = []
     sp = r.get("sprt")
@@ -134,6 +148,8 @@ def fmt(r):
         if sp.get("crashes") or sp.get("forfeits") or sp.get("timeouts"):
             parts.append("crashes %s / forfeits %s / slow %s" % (sp["crashes"], sp["forfeits"], sp["timeouts"]))
         parts.append("slowest game %ss" % int(sp.get("max_secs") or 0))
+        if sp.get("play"):
+            parts.append("vs champion " + fmt_play(sp["play"]))
     rg = r.get("regress")
     if rg:
         parts.append("regression score%% by opponent: %s" % rg.get("by_opponent"))
@@ -166,7 +182,7 @@ def cmd_parent(a):
         prev = [r for r in recs if r.get("round") == a.round - 1]
         if not any(r.get("promoted") for r in prev):
             cands = [r for r in prev if r.get("status") in ("inconclusive", "not_chosen", "regress_fail")
-                     and fitness(r)[0] >= NEAR_MISS]
+                     and fitness(r)[0] >= NEAR_MISS and r.get("area") != "EXPLOIT"]
             if cands:
                 best = max(cands, key=fitness)
                 p = os.path.join(ROOT, best["prog"])
@@ -209,17 +225,29 @@ def cmd_info(a):
     print((r or {}).get(a.field, ""))
 
 
+def cmd_tag(a):
+    """Set one field of a record (e.g. frozen = the opponent dir an exploiter was frozen into)."""
+    r = by_id(load(), a.id)
+    if r:
+        r = dict(r)
+        r[a.key] = a.value
+        append(r)
+
+
+def cmd_last_round(a):
+    print(max([r.get("round", 0) for r in load()] or [0]))
+
+
 def cmd_focus_status(a):
     """Decide whether the curriculum focus (arena/focus.txt) still holds. Prints 'keep' or
-    'release: <reason>'. Release when the goal is met (the champion's regression score vs the
-    baseline >= MIN_BASELINE) or the focus has stalled (STALL consecutive rounds without promotion)."""
+    'release: <reason>'. Released once the focus has stalled: STALL consecutive rounds without a
+    promotion, after at least MIN_ROUNDS rounds. (An earlier version also released when the champion
+    beat the baseline - useless: round 1 already scored 100% vs the baseline. In the real run one
+    round without promotion (r03) was the right signal: the next round, on defence, promoted at 72%.)"""
     recs = latest(load())
-    champ = by_id(recs, champion_id()) or {}
-    base = ((champ.get("regress") or {}).get("by_opponent") or {}).get("baseline")
     rounds = sorted({r.get("round", 0) for r in recs if r.get("round", 0) > 0})
-    if base is not None and base >= a.min_baseline and len(rounds) >= a.min_rounds:
-        print("release: champion %s scores %s%% vs baseline (goal %s%%) after %d rounds"
-              % (champion_id(), base, a.min_baseline, len(rounds)))
+    if len(rounds) < a.min_rounds:
+        print("keep")
         return
     stalled = 0
     for rnd in reversed(rounds):
@@ -277,6 +305,26 @@ def cmd_context(a):
         out.append("  " + fmt(r))
     out.append("")
 
+    # League (AlphaStar-style): opponents from outside our lineage - frozen exploiters that beat a
+    # champion, and external teams in arena/opponents/ext_*.
+    out.append("## League opponents (not descendants of the champion; part of the regression stage)")
+    league = [r for r in recs if r.get("frozen")]
+    exts = sorted(d for d in os.listdir(os.path.join(ROOT, "arena", "opponents"))
+                  if d.startswith("ext_")) if os.path.isdir(os.path.join(ROOT, "arena", "opponents")) else []
+    if not league and not exts:
+        out.append("None yet.")
+    for r in sorted(league, key=lambda r: r.get("round", 0), reverse=True)[:6]:
+        out.append("- `%s/my_team.py` - exploiter from round %s that BEAT the champion of its round: %s. "
+                   "Its idea: %s" % (r["frozen"], r.get("round"), fmt(r), r.get("direction", "")[:200]))
+    for d in exts:
+        out.append("- `arena/opponents/%s/my_team.py` - external team (different style)" % d)
+    champ = by_id(recs, cid) or {}
+    cby = (champ.get("regress") or {}).get("by_opponent") or {}
+    lby = dict((k, v) for k, v in cby.items() if "/exploit_" in k or "/ext_" in k)
+    if lby:
+        out.append("Champion's regression score%% vs these when it was promoted: %s" % lby)
+    out.append("")
+
     bad = ("unchanged", "invalid", "smoke_fail", "unclean", "rejected", "regress_fail")
     fails = sorted([r for r in recs if r.get("status") in bad], key=lambda r: r.get("round", 0),
                    reverse=True)[:6]
@@ -302,14 +350,16 @@ def main():
         p.add_argument(x, default="")
     p = sub.add_parser("promote"); p.add_argument("id")
     p = sub.add_parser("info"); p.add_argument("id"); p.add_argument("field")
-    p = sub.add_parser("focus-status"); p.add_argument("min_baseline", type=float)
-    p.add_argument("stall", type=int)
+    p = sub.add_parser("tag"); p.add_argument("id"); p.add_argument("key"); p.add_argument("value")
+    sub.add_parser("last-round")
+    p = sub.add_parser("focus-status"); p.add_argument("stall", type=int)
     p.add_argument("min_rounds", type=int, nargs="?", default=0)
     p = sub.add_parser("context"); p.add_argument("parent"); p.add_argument("area"); p.add_argument("out")
     p.add_argument("--k", type=int, default=3)
     a = ap.parse_args()
     fn = {"seed": cmd_seed, "parent": cmd_parent, "add": cmd_add, "promote": cmd_promote,
-          "info": cmd_info, "context": cmd_context, "focus-status": cmd_focus_status}.get(a.cmd)
+          "info": cmd_info, "tag": cmd_tag, "last-round": cmd_last_round, "context": cmd_context,
+          "focus-status": cmd_focus_status}.get(a.cmd)
     if not fn:
         ap.print_help()
         return 2

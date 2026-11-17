@@ -1,6 +1,0 @@
-PREFIXES: OFFENSE SEARCH
-CURRENT FOCUS: THE ATTACKER. Every builder works on the attacking agent - each on a DIFFERENT part
-of the problem (banking food safely, path planning under threat, search). The defender (tracker-
-driven, promoted in round 0) is good enough for now; do not spend builder lines on defence or
-coordination yet. Reason: ~84% of games between current-level teams are 0-0 ties, and only an
-attacker that brings food home converts ties into wins.

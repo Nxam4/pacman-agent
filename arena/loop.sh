@@ -3,8 +3,10 @@
 #
 #  program DB -> N builders (parallel)  -> evaluation cascade                         -> promote -> analyst
 #  parent +      each edits its own copy   smoke (2 games vs baseline, must be clean)    + commit    LEARNINGS.md
-#  CONTEXT.md    with diverse inspirations -> SPRT vs champion (sequential, 16-120 games)            + directions
-#                                          -> regression (fixed games vs baseline + recent champs)
+#  CONTEXT.md    with diverse inspirations -> SPRT vs champion (sequential, 16-300 games)            + directions
+#                (every EXPLOIT_EVERY-th   -> regression (fixed games vs baseline, recent champs
+#                 round the last builder      and the league: frozen exploiters + ext_* teams)
+#                 is an exploiter)         exploiter that beats the champion -> arena/opponents/exploit_rNN
 #
 # Run from the repo root, inside WSL/Linux, with the Python 3.8 venv active:
 #   source venv/bin/activate && ROUNDS=4 BUILDERS=3 bash arena/loop.sh
@@ -15,24 +17,26 @@ cd "$(dirname "$0")/.."
 
 ROUNDS=${ROUNDS:-5}
 BUILDERS=${BUILDERS:-3}
-MODEL=${MODEL:-claude-fable-5-2}
+MODEL=${MODEL:-claude-opus-5-5}
 BUILDER_MODELS=${BUILDER_MODELS:-$MODEL}  # comma list, builder i uses entry i (cycled): fast+strong ensemble
 ANALYST_MODEL=${ANALYST_MODEL:-$MODEL}
 SMOKE_GAMES=${SMOKE_GAMES:-2}         # stage 1: games vs baseline, must be clean
 SPRT_S0=${SPRT_S0:-0.50}              # stage 2: SPRT vs champion on score (win 1, tie 0.5); H0 = equal
-SPRT_S1=${SPRT_S1:-0.60}              #   H1 = this much better; lower it later for finer gains (costs games)
-SPRT_ALPHA=${SPRT_ALPHA:-0.05}        #   P(promote | not better)
-SPRT_BETA=${SPRT_BETA:-0.10}          #   P(reject | really s1-good)
-SPRT_MAX=${SPRT_MAX:-120}             #   max games, then "inconclusive" (a near-miss, may be continued)
-REGRESS_GAMES=${REGRESS_GAMES:-12}    # stage 3: games per regression opponent (baseline + recent champs)
-REGRESS_MIN=${REGRESS_MIN:-30}        #   score % needed vs each (loose: catches collapse; a 50% team
-                                      #   falls below 30% in 12 games only ~2% of the time, below 40% ~16%)
+SPRT_S1=${SPRT_S1:-0.55}              #   H1 = this much better. Simulated: a real 57% gain passes 67-81%
+SPRT_ALPHA=${SPRT_ALPHA:-0.05}        #   (was 38-48% with s1=0.60/120 games), an equal one ~4%.
+SPRT_BETA=${SPRT_BETA:-0.10}          #   Costs ~200 games for a no-better candidate - games take seconds,
+SPRT_MAX=${SPRT_MAX:-300}             #   builder sessions cost an hour. Then "inconclusive" (near-miss).
+REGRESS_GAMES=${REGRESS_GAMES:-12}    # stage 3: games per regression opponent
+REGRESS_MIN=${REGRESS_MIN:-30}        #   score % needed vs the baseline and each past champion (loose:
+                                      #   a 50% team falls below 30% in 12 games only ~2% of the time)
+REGRESS_LEAGUE_MIN=${REGRESS_LEAGUE_MIN:-20}  # ... vs league opponents (exploiters beat the champion by
+                                      #   construction, so only a collapse counts)
 CHAMPS_IN_GATE=${CHAMPS_IN_GATE:-2}   # most recent frozen champions in the regression stage
-FOCUS_BASELINE=${FOCUS_BASELINE:-75}  # curriculum focus (arena/focus.txt) is released once the champion
-FOCUS_STALL=${FOCUS_STALL:-2}         #   scores this % vs baseline, or after this many rounds w/o promotion
-FOCUS_MIN_ROUNDS=${FOCUS_MIN_ROUNDS:-3}  # the baseline goal can release the focus only after this many rounds
-                                      #   (the baseline is weak: round 1 already reached 100% vs it)
-BUILDER_TIMEOUT=${BUILDER_TIMEOUT:-90m}
+LEAGUE_EXPLOITS=${LEAGUE_EXPLOITS:-3} # most recent frozen exploiters in it (+ every arena/opponents/ext_*)
+EXPLOIT_EVERY=${EXPLOIT_EVERY:-2}     # every Nth round the last builder is an exploiter (0 = never)
+FOCUS_STALL=${FOCUS_STALL:-1}         # curriculum focus (arena/focus.txt) is released after this many rounds
+FOCUS_MIN_ROUNDS=${FOCUS_MIN_ROUNDS:-3}  #   without a promotion, but not before this many rounds
+BUILDER_TIMEOUT=${BUILDER_TIMEOUT:-45m}  # one idea, small change (r03-r05 builders rarely used 60m)
 ANALYST_TIMEOUT=${ANALYST_TIMEOUT:-20m}
 PUSH=${PUSH:-0}                       # 1 = git push after each promotion (that's what the organisers pull!)
 PY=${PY:-python3}
@@ -102,14 +106,13 @@ focus_block() {   # focus_block ROUND_TAG -> prints the CURRICULUM text; may rel
     echo "No curriculum focus is active: choose the most promising areas freely."; return
   fi
   local fs
-  fs=$(db focus-status "$FOCUS_BASELINE" "$FOCUS_STALL" "$FOCUS_MIN_ROUNDS")
+  fs=$(db focus-status "$FOCUS_STALL" "$FOCUS_MIN_ROUNDS")
   if [ "$fs" = keep ]; then
     cat arena/focus.txt
     echo "ENFORCED: the first $BUILDERS lines of directions.txt must each start with one of the PREFIXES above
 followed by an optional -SUBAREA and a colon (e.g. OFFENSE-BANK:). Use distinct subareas. Lines that
 break this are moved down or your file is replaced by the previous one. The focus is released
-automatically after at least $FOCUS_MIN_ROUNDS rounds once the champion scores >= ${FOCUS_BASELINE}% vs the
-baseline, or after $FOCUS_STALL rounds without a promotion."
+automatically after $FOCUS_STALL round(s) without a promotion (not before round $FOCUS_MIN_ROUNDS)."
   else
     echo ">>> focus released ($fs)" >&2
     mv arena/focus.txt "arena/work/$1/focus_released.txt"
@@ -145,13 +148,25 @@ EOF
   commit "Round $1: learnings" arena/LEARNINGS.md arena/directions.txt
 }
 
-echo "models=${BUILDER_MODELS} analyst=$ANALYST_MODEL builders=$BUILDERS workers/builder=$BUILDER_WORKERS smoke=$SMOKE_GAMES sprt=[$SPRT_S0,$SPRT_S1] a=$SPRT_ALPHA b=$SPRT_BETA max=$SPRT_MAX regress=${REGRESS_GAMES}@${REGRESS_MIN}%"
+echo "models=${BUILDER_MODELS} analyst=$ANALYST_MODEL builders=$BUILDERS workers/builder=$BUILDER_WORKERS smoke=$SMOKE_GAMES sprt=[$SPRT_S0,$SPRT_S1] a=$SPRT_ALPHA b=$SPRT_BETA max=$SPRT_MAX regress=${REGRESS_GAMES}@${REGRESS_MIN}%/league ${REGRESS_LEAGUE_MIN}% exploit_every=$EXPLOIT_EVERY timeout=$BUILDER_TIMEOUT"
 db seed my_team.py
-done_rounds=(arena/work/r*/)
-start_round=${#done_rounds[@]}
+# Next round = after the highest round seen in arena/work/ OR in the program DB (work dirs can be
+# deleted by hand; reusing a round number would overwrite DB records and frozen champions).
+start_round=$(db last-round)
+for d in arena/work/r*/; do
+  n=$(basename "$d"); n=${n#r}; [[ "$n" =~ ^[0-9]+$ ]] && (( 10#$n > start_round )) && start_round=$((10#$n))
+done
+P=$(printf "r%02d" "$start_round")
+st_files=(arena/work/$P/cand_*/status)
+if [ "$start_round" -gt 0 ] && [ -d "arena/work/$P" ] && [ "${#st_files[@]}" -eq 0 ] \
+   && [ "$start_round" -gt "$(db last-round)" ]; then   # Ctrl-C during the builders: nothing evaluated
+  echo ">>> round $P was interrupted before evaluation - discarding it, it is redone now"
+  rm -rf "arena/work/$P"; rm -f arena/logs/${P}_*
+  start_round=$((start_round - 1))
+fi
 if [ "$start_round" -gt 0 ]; then   # catch up an analyst that never ran (usage limit, crash, Ctrl-C)
   P=$(printf "r%02d" "$start_round")
-  if [ ! -s "arena/logs/${P}_analyst.log" ] || limit_hit "arena/logs/${P}_analyst.log"; then
+  if [ -d "arena/work/$P" ] && { [ ! -s "arena/logs/${P}_analyst.log" ] || limit_hit "arena/logs/${P}_analyst.log"; }; then
     echo ">>> catching up the analyst for $P"
     pw=$(db info "$(cat arena/db/champion.txt)" round)
     [ "$pw" = "$start_round" ] && pwin="arena/work/$P (promoted: $(cat arena/db/champion.txt))" || pwin=none
@@ -164,23 +179,39 @@ for ((r = start_round + 1; r <= start_round + ROUNDS; r++)); do
   echo "================ round $R  $(date '+%F %T') ================"
 
   # ---- 1. builders, in parallel: parent + context from the program database -------------
-  mapfile -t DIRS < <(grep -v '^\s*$' arena/directions.txt | head -n "$BUILDERS")
+  # League (AlphaStar): every EXPLOIT_EVERY-th round the last slot is an exploiter whose only goal
+  # is to beat the champion. Its direction: the analyst's first "EXPLOIT..." line, else a default.
+  exploit=0
+  if [ "$EXPLOIT_EVERY" -gt 0 ] && [ "$BUILDERS" -ge 2 ] && (( r % EXPLOIT_EVERY == 0 )); then exploit=1; fi
+  mapfile -t DIRS < <(grep -v '^\s*$' arena/directions.txt | grep -vi '^\s*EXPLOIT' | head -n "$((BUILDERS - exploit))")
+  nnormal=${#DIRS[@]}
+  if [ "$exploit" = 1 ]; then
+    ex=$(grep -i -m1 '^\s*EXPLOIT' arena/directions.txt || true)
+    [ -n "$ex" ] || ex="EXPLOIT: read the champion's code and the layouts it lost on, pick its biggest weakness, and build a team (any style) that beats it."
+    DIRS+=("$ex")
+  fi
   pids=()
   for i in "${!DIRS[@]}"; do
     n=$((i + 1)); w="arena/work/$R/cand_$n"; mkdir -p "$w"
     dir=${DIRS[$i]}; area=$(printf '%s' "${dir%%:*}" | tr -cd 'A-Za-z_-' | cut -c1-24); [ -n "$area" ] || area=MISC
     model=${MODELS[$(( i % ${#MODELS[@]} ))]}
-    read -r pid ppath < <(db parent "$n" "${#DIRS[@]}" "$r")
-    if [ "$ppath" != "$PWD/my_team.py" ]; then   # island step: continue a near-miss lineage
-      area=$(db info "$pid" area)
-      dir="CONTINUE $area: finish near-miss $pid (see CONTEXT.md) - its idea was: $(db info "$pid" direction) -- Find what kept it below the promotion bar (its lost games, timing, bugs) and fix that; keep what worked."
+    tmpl=arena/prompts/builder.md
+    if [ "$i" -ge "$nnormal" ]; then   # the exploiter: always starts from the champion
+      area=EXPLOIT; tmpl=arena/prompts/exploiter.md
+      pid=$(cat arena/db/champion.txt); ppath="$PWD/my_team.py"
+    else
+      read -r pid ppath < <(db parent "$n" "$nnormal" "$r")
+      if [ "$ppath" != "$PWD/my_team.py" ]; then   # island step: continue a near-miss lineage
+        area=$(db info "$pid" area)
+        dir="CONTINUE $area: finish near-miss $pid (see CONTEXT.md) - its idea was: $(db info "$pid" direction) -- Find what kept it below the promotion bar (its lost games, timing, bugs) and fix that; keep what worked."
+      fi
     fi
     cp "$ppath" "$w/my_team.py"; cp "$ppath" "$w/parent.py"
     printf '%s\n' "$pid" > "$w/parent_id"; printf '%s\n' "$area" > "$w/area"
     printf '%s\n' "$dir" > "$w/direction"; printf '%s\n' "$model" > "$w/model"
     db context "$pid" "$area" "$w/CONTEXT.md"
     prompt="$(sed -e "s|{{FILE}}|$w/my_team.py|g" -e "s|{{NOTES}}|$w/NOTES.md|g" \
-                  -e "s|{{CONTEXT}}|$w/CONTEXT.md|g" -e "s|{{BUDGET}}|$BUILDER_TIMEOUT|g" arena/prompts/builder.md)
+                  -e "s|{{CONTEXT}}|$w/CONTEXT.md|g" -e "s|{{BUDGET}}|$BUILDER_TIMEOUT|g" "$tmpl")
 
 YOUR DIRECTION FOR THIS ROUND:
 ${dir}"
@@ -205,9 +236,13 @@ ${dir}"
   fi
 
   # ---- 2. evaluation cascade: smoke -> SPRT vs champion -> regression --------------------
-  past=(arena/opponents/*/my_team.py)
+  past=(arena/opponents/champ_*/my_team.py)
   recent=("${past[@]: -$CHAMPS_IN_GATE}")
   [ "${#past[@]}" -le "$CHAMPS_IN_GATE" ] && recent=("${past[@]}")
+  exps=(arena/opponents/exploit_*/my_team.py)
+  league=("${exps[@]: -$LEAGUE_EXPLOITS}")
+  [ "${#exps[@]}" -le "$LEAGUE_EXPLOITS" ] && league=("${exps[@]}")
+  league+=(arena/opponents/ext_*/my_team.py)
   passed=()
   for w in arena/work/$R/cand_*; do
     if cmp -s "$w/my_team.py" "$w/parent.py"; then status=unchanged
@@ -231,27 +266,39 @@ ${dir}"
     fi
     if [ "$status" = passed ]; then
       $PY arena/arena.py "$w/my_team.py" --opponents pacman-contest/src/contest/baseline_team.py "${recent[@]}" \
-          --games "$REGRESS_GAMES" --seed $((r + 500)) --json "$w/regress.json" | tee "$w/regress.txt" || true
+          "${league[@]}" --games "$REGRESS_GAMES" --seed $((r + 500)) --json "$w/regress.json" \
+          | tee "$w/regress.txt" || true
       passed+=("$w")
     fi
     echo "$w: $status"
     printf '%s\n' "$status" > "$w/status"
   done
   winner=""
-  [ "${#passed[@]}" -gt 0 ] && winner=$($PY arena/pick.py --select "$REGRESS_MIN" "${passed[@]}" || true)
+  [ "${#passed[@]}" -gt 0 ] && winner=$($PY arena/pick.py --select "$REGRESS_MIN" --league-min "$REGRESS_LEAGUE_MIN" "${passed[@]}" || true)
 
   # ---- 3. archive every candidate in the program DB, promote the winner --------------------
   for w in arena/work/$R/cand_*; do
     st=$(cat "$w/status")
     if [ "$st" = passed ]; then
       if [ -n "$winner" ] && [ "$(dirname "$winner")" = "$w" ]; then st=passed
-      elif $PY arena/pick.py --select "$REGRESS_MIN" "$w" 2>/dev/null | grep -q .; then st=not_chosen
+      elif $PY arena/pick.py --select "$REGRESS_MIN" --league-min "$REGRESS_LEAGUE_MIN" "$w" 2>/dev/null | grep -q .; then st=not_chosen
       else st=regress_fail; fi
     fi
     db add "${R}$(basename "$w" | tr -d '_')" "$r" "$st" "$w/my_team.py" \
        --area "$(cat "$w/area")" --direction "$(cat "$w/direction")" --model "$(cat "$w/model")" \
        --parent "$(cat "$w/parent_id")" --smoke "$w/smoke.json" --sprt "$w/sprt.json" \
        --regress "$w/regress.json" --notes "$w/NOTES.md" || echo "WARNING: db add failed for $w"
+  done
+  # an exploiter that beat the champion (SPRT H1) joins the league as a permanent sparring partner
+  for w in arena/work/$R/cand_*; do
+    [ "$(cat "$w/area")" = EXPLOIT ] || continue
+    [ -n "$winner" ] && [ "$(dirname "$winner")" = "$w" ] && continue   # promoted: frozen as a champ later
+    [ "$($PY arena/pick.py --sprt "$w/sprt.json" 2>/dev/null)" = H1 ] || continue
+    ed="arena/opponents/exploit_$R"; mkdir -p "$ed"; cp "$w/my_team.py" "$ed/my_team.py"
+    [ -f "$w/NOTES.md" ] && cp "$w/NOTES.md" "$ed/NOTES.md"
+    db tag "${R}$(basename "$w" | tr -d '_')" frozen "$ed"
+    echo ">>> exploiter $w beat the champion - frozen into $ed (league opponent from now on)"
+    commit "Round $R: league opponent exploit_$R" "$ed"
   done
   if [ -n "$winner" ]; then
     echo ">>> promoting $winner"

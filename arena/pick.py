@@ -7,11 +7,13 @@
   pick.py --sprt REPORT.json
       Print the SPRT decision of an  arena.py --sprt  report: H1 / H0 / inconclusive / unclean.
 
-  pick.py --select REGRESS_MIN CAND_DIR [CAND_DIR ...]
+  pick.py --select REGRESS_MIN [--league-min L] CAND_DIR [CAND_DIR ...]
       Each CAND_DIR may hold sprt.json (arena --sprt vs the champion) and regress.json (fixed games vs
-      baseline + recent champions). A candidate qualifies if its SPRT accepted H1 (better than the
-      champion) and its regression run is clean with score% >= REGRESS_MIN against every opponent
-      (a loose sanity bound: no collapse against older teams). Prints the qualifier with the
+      baseline + recent champions + league). A candidate qualifies if its SPRT accepted H1 (better
+      than the champion) and its regression run is clean with score% >= REGRESS_MIN against the
+      baseline and every past champion (a loose sanity bound: no collapse against older teams), and
+      >= L (default 20) against league opponents (arena/opponents/exploit_* and ext_*: they may
+      legitimately beat the champion, so only a collapse counts). Prints the qualifier with the
       highest SPRT score, or nothing.
 
 Why SPRT instead of a fixed "24 games >= 55% contest points": contest points % depends on the
@@ -54,7 +56,12 @@ def sprt_decision(path):
         return "missing", {}
 
 
-def cmd_select(regress_min, dirs):
+def is_league(opp):
+    """Exploiters / external teams: they may beat the champion, so they get a lower floor."""
+    return "/exploit_" in opp or "/ext_" in opp
+
+
+def cmd_select(regress_min, dirs, league_min):
     best, best_score = None, -1.0
     for d in dirs:
         name = os.path.basename(d.rstrip("/"))
@@ -67,11 +74,14 @@ def cmd_select(regress_min, dirs):
         except Exception:
             print(f"{name}: sprt=H1 but no regression report -> rejected", file=sys.stderr)
             continue
-        worst = min([v.get("score_pct", 0) for v in reg["by_opponent"].values()] or [0])
-        ok = clean(reg["total"]) and worst >= regress_min
+        core = [v.get("score_pct", 0) for k, v in reg["by_opponent"].items() if not is_league(k)]
+        lg = [v.get("score_pct", 0) for k, v in reg["by_opponent"].items() if is_league(k)]
+        worst = min(core or [0])
+        lworst = min(lg) if lg else None
+        ok = clean(reg["total"]) and worst >= regress_min and (lworst is None or lworst >= league_min)
         print(f"{name}: sprt=H1 score={100 * s.get('score', 0):.1f}% games={s.get('games')} "
-              f"regression worst={worst}% clean={clean(reg['total'])} -> {'OK' if ok else 'rejected'}",
-              file=sys.stderr)
+              f"regression worst={worst}% league worst={lworst if lworst is not None else '-'}% "
+              f"clean={clean(reg['total'])} -> {'OK' if ok else 'rejected'}", file=sys.stderr)
         if ok and s.get("score", 0) > best_score:
             best, best_score = os.path.join(d, "my_team.py"), s.get("score", 0)
     if best:
@@ -87,6 +97,10 @@ if __name__ == "__main__":
         print(sprt_decision(sys.argv[2])[0])
         sys.exit(0)
     if mode == "--select":
-        sys.exit(cmd_select(float(sys.argv[2]), sys.argv[3:]))
+        rest = sys.argv[3:]
+        lmin = 20.0
+        if rest[:1] == ["--league-min"]:
+            lmin, rest = float(rest[1]), rest[2:]
+        sys.exit(cmd_select(float(sys.argv[2]), rest, lmin))
     print(__doc__)
     sys.exit(2)

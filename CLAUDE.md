@@ -30,8 +30,11 @@ The organisers clone this repo and load `my_team.py` from its root. Test round: 
 - Run a visible game (from `pacman-contest/src/contest/`):
   `python capture.py -r ../../../my_team.py -b baseline_team`
 - Evaluate a team file: `python3 arena/arena.py <team.py> [--quick] [--opponents a.py b.py] [--games N]`
-  Prints W/T/L, points %, crashes and timeout ("slow") counts per opponent. Results are noisy:
-  under ~30 games, only trust large differences.
+  Prints W/T/L, points %, crashes and timeout ("slow") counts per opponent, plus per-game play
+  stats (bank/conc = food returned by us/them, died/drop = our Pacman deaths/food dropped, kill).
+  Results are noisy: under ~30 games, only trust large differences.
+- Numeric constants live in top-level `NAME = number` lines; `arena/tune.py` tunes them (SPSA).
+- `arena/opponents/exploit_*` and `ext_*` are league opponents of a different style (not our lineage).
 - `arena/opponents/champ_*/my_team.py` are frozen past champions; a new version must not regress
   against them.
 - `arena/LEARNINGS.md` - accumulated findings. Read it before changing strategy.
