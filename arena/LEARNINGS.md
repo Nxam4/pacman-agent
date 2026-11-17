@@ -1,116 +1,88 @@
 # Learnings (maintained by the analyst agent)
 
-Champion history: seed (r00: tracker defender + nearest-food reflex attacker) -> r01cand1
-(BankingAttacker) -> r02cand1 (soft-cost Dijkstra attacker + invader snap) -> r04cand1 (same
-attacker + exit-denial defender `_guard`) -> **r05cand1** (r04cand1 + attacker as second guard
-`HELP_ON` + dead-end mouth trap `TRAP_ON`). Past programs: `arena/db/progs/<id>.py`; frozen
-champions `arena/opponents/champ_r*`.
-Champion gate: 29-11-10, 69.0% in 50 vs r04cand1, avg margin +10.4; regress 12-0-0 baseline,
-10-0-2 champ_r02, 9-1-2 champ_r04.
+Champion history: seed (r00) -> r01cand1 (BankingAttacker) -> r02cand1 (soft-cost Dijkstra
+attacker + invader snap) -> r04cand1 (+ exit-denial defender `_guard`) -> r05cand1 (+ attacker as
+second guard `HELP_ON`, dead-end trap `TRAP_ON`) -> **r06cand3** (an EXPLOITER: r05cand1 code with
+`DOUBLE_ATTACK` - both agents attack, `LANE_SPLIT` top/bottom food - until our lead >= `TURTLE_LEAD`
+(4), then lane 0 goes home and runs r05cand1's `_guard`, lane 1 attacks and helps). The turtle is not
+sticky: lead < 4 -> both attack again, with NO defender. Past programs: `arena/db/progs/<id>.py`;
+frozen champions `arena/opponents/champ_r*`.
+Champion gate: 153-39-108, 57.5% in 300 vs r05cand1, avg +4.35; regress baseline 11-0-1,
+champ_r04 7-0-5, champ_r05 7-1-4, ext_rush 12-0-0, ext_turtle 12-0-0.
 
 ## Standing facts
-- **EnemyTracker works** (inside my_team.py). Best guess of a hidden enemy is off by 3.2 cells on
-  average (12.1 for "last seen"); true cell inside the belief 98.5% of the time; ~0.4 ms per update.
-- The gate is SPRT on score% (win 1, tie 0.5) vs the champion, then a regression check vs baseline
-  and older champions. **Builders' own numbers do not replicate, in either direction:**
-  - The champion against itself: 45.8% in 60 games (r05cand1's control), 41.7% in 24 (r05cand3's
-    control; the SPRT even "accepted H0" for it), 48.3% in 30 gate games (r04).
-  - Builder -> gate: r05cand1 55.8% in 120 -> 69.0% in 50; r05cand2 46% in 96 (two H0 verdicts)
-    -> 65.0% in 30 (H1); r05cand3 56.2% in 24 -> 48.6% in 70; r03cand2 55-69% -> 41.2%.
-  - Rule: under ~60 games trust nothing smaller than ~20 points.
-- **Most RANDOM maps are fixed mirrors: red and blue get +x/-x whatever we change.** In the r05
-  gate all three candidates scored RANDOM566311 R-12/B+12, RANDOM484028 R-1/B+1, and 0/0 on
-  RANDOM145045 / 396019 / 774805 / 836070. Only games whose result CHANGES carry signal. So: run
-  the parent as a control on the same seed and compare game by game (r05cand1 and r05cand3 did;
-  it was the most useful measurement of the round). Test both colours, never the same `--seed`
-  in two arenas at once.
-- **Harness trap:** `arena.play()` with a candidate path that does not exist, or that does not
-  end in `.py` (e.g. `.bak`), prints plausible scores (0 s games, all ties) and no error. Check
-  that "secs" looks real.
-- Timing is not a constraint yet: gate games 3-13 s wall-clock, no warning in ~900 gate games over
-  four rounds; the 5x5 joint move search costs nothing measurable.
+- **EnemyTracker works** (inside my_team.py): best guess off by 3.2 cells on average, true cell in
+  the belief 98.5% of the time, ~0.4 ms per update.
+- The gate is SPRT on score% (win 1, tie 0.5) vs the champion, then regression vs baseline, older
+  champions and ext_*. **Builders' own numbers do not replicate, in either direction:**
+  - Champion vs itself: 45.8% (60), 41.7% (24), 48.3% (30), 53.3% and 54.2% (60 each, r06cand1).
+  - Builder -> gate: r06cand3 51.5% in 100 -> 57.5% in 300; r06cand1 56.3% in 120 -> 45.9% in 110;
+    r05cand1 55.8% -> 69.0%; r05cand2 46% -> 65.0%; r05cand3 56.2% -> 48.6%.
+  - Rule: under ~100 games trust nothing smaller than ~10 points; under 60, ~20.
+- **Most RANDOM maps are fixed mirrors** (red/blue get +x/-x whatever we change). Only games whose
+  result CHANGES carry signal: run the parent as a same-seed control and compare game by game, both
+  colours, never the same `--seed` in two arenas at once. r06cand1: 26 of 60 games identical.
+- **Harness trap:** `arena.play()` with a missing path or one not ending in `.py` prints plausible
+  0 s all-tie results and no error. Check that "secs" looks real.
+- Timing: gate games 3-24 s wall-clock, no warning in ~1300 gate games. A 150-playout defender
+  search hit 0.26-0.30 s per move (r06cand2) - that is the budget scale for playouts.
 
-## Round 5 (all three candidates started from r04cand1)
-- **r05cand1 COORDINATION-HELPER: promoted, 69.0% in 50.** The attacker joins the exit cover when
-  it is at home or <= 6 from the border, carries <= 2, is not scared, and the invader carries >= 3
-  or is within 8 (`HELP_NEAR`); both pick moves from a 5x5 joint search minimising max over exits
-  of min(d_def, d_att) - d_inv; if both together cannot cover, the attacker goes back to attack.
-  Builder's same-seed ablation (60 games each, vs r04cand1; control = 45.8%):
-  help only 50.0%, kills 25 vs 11, dots conceded 651 vs 1022, dots scored 800 vs 883;
-  trap only 51.7%, kills 7; both 55.8% on two seeds; `HELP_NEAR=0` loses the gain; 12 = 8.
-  So: **the helper is what kills invaders (2.3x), and it costs ~10% of our own scoring.** The trap
-  adds no kills on its own. Gate games that changed vs the mirror pattern: RANDOM577531 +13/+4
-  (others -4/+4), RANDOM616917 +14/+13 (others -13/+10), crowded +33/+51/+35/+51, jumbo 5 of 6
-  won. Worse: RANDOM227634 R-3/B-17 (others R+17/B-17), office 0/+12/-11/+2/-9/-6.
-- **r05cand2 OFFENSE-ANTIGUARD: passed the gate, not chosen: 17-5-8, 65.0% in 30, avg +4.8**
-  (regress 12-0-0 baseline, 10-1-1 champ_r02, 8-1-3 champ_r04). `EXIT_ON`: exit slack = max over
-  home-border cells of (located ghost's arrival - ours via the dot); dots with slack < 2 cost more;
-  carrying >= 2 and the chosen dot has slack < 1 -> bank first; enter on the side away from the
-  defender. **Conflicting evidence:** the builder's own two SPRTs said H0 (47.1% in 52, 45.5% in
-  44, seed 501). 126 games together are ~51%. Treat as unproven, not as failed; it is the only
-  attacker change since r02 to pass a gate, and it is not in the champion. Its gate signal came
-  from office (+27/+53/+38/-9), strategic and crowded; 4 of 6 RANDOM pairs were pure mirrors.
-  Solid findings from its diagnostics (16 champion mirror games):
-  - **Our attacker rarely dies (2-4 deaths per 16 games). It gets sealed in**: 460-870 attacker
-    moves per 16 games with exit slack < 1, carrying ~22 dots, until the game ends. Trace jumbo
-    red: carrying 44, oscillating 2 steps from home for 160 moves; same on alley (100-155 moves).
-  - The capsule escape almost never fires: the guard covers the capsule too (`GUARD_CAPS`).
-  - Banking earlier cut dots-stuck-while-sealed by half, and the builder saw no more wins; its
-    reading: a sealed attacker also pins their guard, so leaving frees it.
-- **r05cand3 COORDINATION-ROLES: rejected, 25-18-27, 48.6% in 70, avg +0.8.** Defender raids 1-2
-  dots when no invader for 8 moves (`RAID_ON`), attacker covers meanwhile (`SWAP_ON`). The raid
-  almost never fires: on fastCapture the enemy attacker stands in sight at our border all game
-  (belief mass 1.0 for ~250 moves); fastCapture stayed 0/0/0/0 in the gate and default got worse
-  (0/+7/-6/-3/-5/-5). **Small maps end in a 2x2 border standoff**: each of our agents faces one
-  of theirs, and whoever leaves lets the other in. Opportunistic raiding does not break it.
+## Round 6 (all three from r05cand1)
+- **r06cand3 EXPLOIT double attack + turtle: promoted, 57.5% in 300.** Per gate layout (W-T-L, avg,
+  bank/conc): crowded 24-0-0 +23 (23/0), jumbo 12-0-8 +25 (73/48), strategic 16-0-6 +8.5,
+  distant 15-1-8, default 14-1-9, RANDOM 49-26-45 +1.3 (neutral). **Worse: alley 5-0-17 (bank 3.9,
+  conc 6.5), office 12-0-8 but avg -5.2 (conc 34, died 1.65), fast 6-11-7 (bank 1.2).** Blue
+  83-21-46, red 70-18-62. It kills little (0.25/game) and drops 6.7 dots/game on 0.6 deaths.
+  Regress weak spots: champ_r04 RANDOM 1-0-5 (conc 21.5, died 1.17); champ_r05 jumbo 0-2 (conc 96).
+  Reading: a second attacker wins big open maps; with no defender while lead < 4 we concede on
+  small / choke maps and to any team with a real guard.
+- Builder's weakness analysis (code-verified): `_guard` and `joint_cover` cover ONE invader (the
+  max-carry one); a second invader walks home free. The new champion itself sends two invaders, so
+  this matters in every mirror game and in its own turtle phase.
+- **r06cand1 EXIT_ON merge (r05cand2's attacker exit-slack): rejected, 45.9% in 110** (gate jumbo
+  2-0-6 avg -27, office 0-1-5). Builder 120 same-seed games: 22 changed better / 19 worse; drops
+  fall (7.6 -> 1.6) but conceded rises; strategic 5 better / 0 worse; turns 0-0 mirrors
+  (RANDOM702264, 88995) into losses in both colours. Across ~330 games EXIT_ON is ~50%: **settled,
+  do not port again.**
+- **r06cand2 defender playout search: rejected, 42.5% in 40.** Defender-only, fired only when the
+  invader already had a safe exit (solo margin > 0), playout ghosts chase/intercept (weaker than the
+  rule guard), override on 25% of calls. A lone defender cannot turn margin > 0 into a kill. If
+  retried: search JOINT moves where joint margin is 1-2, and use the rule guard as playout policy.
 
 ## Defence: what is established
-- **Covering every exit is the lever; chasing is worth nothing.** r04cand1 `_guard` (stand where
-  we reach every border exit no later than the invader, then close in): 71.7% in 30. r04cand2
-  (same idea, joint with the attacker): 67.5% in 40. r05cand1 (both): 69.0% in 50 on top.
-  "Cut the shortest way home and chase from behind" was neutral (16 games 7-2-7): our kind of
-  attacker only takes paths it reaches first, so kills happen only when ALL exits are covered.
-- `GUARD_CAPS` (our capsules count as exits) and `SCARED_GAP` (scared defender blocks at
-  distance 2) came from one trace and were never ablated.
-- Never built: any search or playout for the defenders.
+- **Covering every exit is the lever; chasing is worth nothing.** r04cand1 `_guard`: 71.7% in 30;
+  r05cand1 (+ attacker as second jaw, `HELP_ON`): 69.0% in 50 on top. Helper ablation (60 games):
+  kills 25 vs 11, conceded 651 vs 1022, but own scoring 800 vs 883. `HELP_NEAR=0` loses the gain.
+  `TRAP_ON` adds no kills on its own. Kills happen only when ALL exits are covered.
+- `GUARD_CAPS`, `SCARED_GAP` never ablated. Guard exits are every open border cell (14 on the
+  RANDOM404807 pipe map) rather than the real crossings.
+- Under the r06 champion, this defence only runs when lead >= 4.
 
-## Attacker: what is established (rounds 1-5)
-- A planning attacker that banks food beat the reflex attacker 90% (r01). **Soft costs beat hard
-  "provably safe" rules** (r02: 83.3% in 30; hard safe-return filter 60%). `SAFE_RETURN = False`.
-- **Sampled-world (Monte Carlo) checks of the attacker's plan do not help - tested three times**
-  (57.1% in 120; 39.1% in 32; 28.1% in 16). Do not retry without a new source of information.
-- Safety ideas with no gate gain: tracker guess as a wall, pocket penalty (r04cand3, 51.7% in 30;
-  its cut-cell pocket map `_pockets` is sound and cheap), longer trips (r03cand2: 41.2% in 40 with
-  avg margin +2.1 - bigger loads raise the margin on a few maps and lose more close games).
-  Win count is what scores, not margin.
-- The problem has moved from dying to being sealed in (see r05cand2). Old death-based ideas
-  (load cap, pocket penalty) aim at 2-4 deaths per 16 games.
-- The attacker waiting at the border is a de facto second defender. Stall-aggression scored
-  20-30% on fast/alleyCapture; late gamble and "lead lock" were neutral.
+## Attacker: what is established (rounds 1-6)
+- Planning + banking beat reflex 90% (r01). **Soft costs beat hard safety rules** (r02: 83.3%).
+- **Do not retry:** Monte Carlo checks of the attacker's plan (3 times, 57/39/28%); EXIT_ON exit-slack
+  model (r05cand2 + r06cand1, ~50% over ~330 games); tracker guess as wall, pocket penalty (51.7%);
+  longer trips (41.2%). Win count is what scores, not margin.
+- Against one real guard our attacker rarely dies but gets sealed in (r05: 460-870 moves per 16
+  games with exit slack < 1, carrying ~22). A second attacker is what beat that (r06cand3): the
+  guard covers only one of them. The lanes are only food halves - no decoy/coordination yet.
 
 ## Known failure patterns
-- **Small maps are coin flips near 0** (2x2 standoff above). r05cand1 gate: alley 0/+1/+1/+1,
-  distant -3/+7; r05cand3: fast 0/0/0/0. Four rounds, nothing has moved them.
-- **Big maps are decided by one load**: jumbo -105/+87 (r05cand2), -77/+78, -47 (r05cand3);
-  strategic -32/+22. officeCapture is the champion's weakest fixed map in the gate (3 losses, 1
-  tie in 6) and it tied/lost office vs champ_r04 in regress.
-- Maps lost in regress by BOTH r05cand1 and r05cand2: RANDOM294127 as red vs champ_r02 (-1, -7)
-  and RANDOM493143 as red vs champ_r04 (-2, -10). RANDOM566311 red is -12 for every version.
-- RANDOM227634 red: +17 for r04cand1-like teams, -3 with the helper on. Unexplained; trace it:
-  `cd pacman-contest/src/contest && python capture.py -r ../../../my_team.py -b ../../../arena/opponents/champ_r04/my_team.py -l RANDOM227634 -q`
-- RANDOM404807 (2-wide border pipe joined to each half only at top and bottom): r04cand1 vs seed
-  blue +28, red -18; vs baseline -15/-13. Guard exits are all 14 pipe cells, not the two real
-  crossings. Not rechecked with the helper.
+- **Small maps.** Before r06 every version was a coin flip (2x2 standoff: whoever leaves lets the
+  other in). With double attack: alley 5-0-17 (lost), fast 6-11-7, still bank ~1-4 per game.
+  Opportunistic raiding (r05cand3, 48.6%) and plain aggression (20-30%) failed.
+- **officeCapture** is the weakest fixed map for three champions in a row (r06: avg -5.2, conc 34;
+  r06cand1 and r06cand2 also lost it to the older champions in their final checks).- **Big maps are decided by one load**: jumbo swings -105..+87; the r06 champion conceded 96/game
+  to champ_r05 there (no defender while lead < 4).
+- RANDOM566311 red is -12 for every version; RANDOM294127 red vs champ_r02 and RANDOM493143 red vs
+  champ_r04 lost by both r05 candidates; RANDOM227634 red +17 without helper, -3 with it.
+- RANDOM404807 (2-wide border pipe): r04cand1 red -18 vs seed, -15/-13 vs baseline. Not rechecked.
 
 ## Open questions (untested)
-- Does `EXIT_ON` (r05cand2) add to r05cand1? The mirror opponent's helper now triggers when our
-  invader carries >= 3, so banking at 2 may matter more than it did against r04cand1.
-- Helper only when the defender alone cannot cover (solo margin > 0): would it keep the kills
-  and give back the lost scoring?
-- Breaking a seal with the second agent (their guard follows the bigger load), and an active
-  "mark their attacker, then raid on the far side" switch for the 2x2 standoff. Both need two
-  agents acting on a shared flag; r05cand3's passive version did not fire.
-- Guard exits on pipe/choke maps; where the defender waits with no invader.
-- Playout search for the defenders with an invader model (KNOWLEDGE sec. 1 and 3).
-- Process: builders finish in good time with honest notes. A same-seed control run of the parent
-  plus per-flag ablation is now the standard; log the layout name next to kills/conceded.
+- Cover two invaders at once in `_guard`/`joint_cover` (the gap the exploiter found).
+- An invader-triggered recall: one lane goes home when an enemy Pacman carries a lot, whatever the
+  lead. A small-map gate (one defender from the start on alley/fast-type maps).
+- Coordinating the two attackers (decoy toward the guard, the other banks on the far side).
+- Joint-move playout search for defence where joint margin is 1-2 (KNOWLEDGE sec. 1, 3).
+- Process: same-seed parent control + per-flag ablation is the standard; log layout next to
+  kills / conceded / banked.
