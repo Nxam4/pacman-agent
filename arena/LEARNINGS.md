@@ -3,84 +3,82 @@
 Champion history: seed (r00) -> r01cand1 (BankingAttacker) -> r02cand1 (soft-cost Dijkstra
 attacker + invader snap) -> r04cand1 (+ exit-denial defender `_guard`) -> r05cand1 (+ attacker as
 second guard `HELP_ON`, dead-end trap `TRAP_ON`) -> r06cand3 (EXPLOITER: `DOUBLE_ATTACK` +
-`LANE_SPLIT` until lead >= `TURTLE_LEAD` (4), then lane 0 runs `_guard`, lane 1 attacks/helps; not
-sticky, NO defender while lead < 4) -> **r08cand2** (+ `ROUTE_ON`: attacker orders a trip of up to
-`ROUTE_K` dots + return by nearest-neighbour chaining when no visible ghost within `ROUTE_GHOST`;
-replanned every move, only the dot ORDER changes, go-home rule unchanged). Past programs:
-`arena/db/progs/<id>.py`; frozen champions `arena/opponents/champ_rNN` = the champion at the START of
-round NN (champ_r08 = r06cand3, champ_r06 = r05cand1); the current champion r08cand2 is the gate opponent.
-Champion gate: 87-23-60, 57.9% in 170 vs r06cand3; regress baseline 11-0-1, champ_r05 8-1-3,
-champ_r06 7-0-5, ext_rush 12-0-0, ext_turtle 12-0-0. Round 9: nothing promoted.
+`LANE_SPLIT` until lead >= `TURTLE_LEAD`, then lane 0 runs `_guard`, lane 1 attacks/helps; not
+sticky, NO defender while behind the lead) -> r08cand2 (+ `ROUTE_ON`: trip of up to `ROUTE_K` dots +
+return by nearest-neighbour chaining when no visible ghost within `ROUTE_GHOST`) -> **tune_1117_1652**
+(SPSA constants on r08cand2: TURTLE_LEAD 3, CARRY_BUDGET 16, CARRY_STEP 0 = carry budget no longer
+scales, ROUTE_K 8, ROUTE_FIRST 5, HELP_MAX_CARRY 0, HELP_BORDER 4). Past programs:
+`arena/db/progs/<id>.py`; frozen champions `arena/opponents/champ_rNN` = champion at the START of round
+NN (champ_r09t = r08cand2, champ_r08 = r06cand3). The tuned champion is the gate opponent.
+Tune gate: 71.7% in 60 vs r08cand2; regress 85% (champ_r06 66.7%, ext_rush 75%). Rounds 9-10: nothing promoted.
 
 ## Standing facts
+- **The mirror over-states progress.** Held-out benchmark (arena/ext_pool, 240 paired games): tuned
+  champion 89.2% vs r08cand2 88.8%, paired +0.4 +- 2.6, despite 71.7% head-to-head. Weakest held-out
+  opponents: ylmiami 68.8% (7 losses), uripont 81%, rashomonset 83%. Training field: ext_gh_diana_catana
+  is the one field team near 50% (4-0-4 and 3-0-5 in two r10 builder runs); the rest >= 75%.
 - **EnemyTracker works** (inside my_team.py): best guess off by 3.2 cells on average, true cell in
   the belief 98.5% of the time, ~0.4 ms per update.
-- The gate is SPRT on score% (win 1, tie 0.5) vs the champion, then regression vs baseline, older
-  champions and ext_*. **Builders' own numbers do not replicate, in either direction:**
-  - Champion vs itself: 45.8% (60), 41.7% (24), 48.3% (30), 53.3% and 54.2% (60 each, r06cand1).
-  - Builder -> gate: r06cand3 51.5% in 100 -> 57.5% in 300; r06cand1 56.3% in 120 -> 45.9% in 110;
-    r05cand1 55.8% -> 69.0%; r05cand2 46% -> 65.0%; r05cand3 56.2% -> 48.6%.
-  - r07: cand2 53.5% in 100 -> 50.0% in 260; cand3 same-seed 56.7% in 60 -> 50.0% in 290.
-  - r09: cand1 52.5% in 100 -> 45.0% in 130; cand2 55.5% in 100 -> 49.7% in 190; cand3 55.8% in 60
-    -> 49.6% in 230. Builders' own SPRT runs capped at 100 games are no better than any other sample.
-  - Rule: under ~100 games trust nothing smaller than ~10 points; under 60, ~20.
-- **Mirror colour bias:** against the champion, near-copies win crowded as RED and lose it as BLUE
-  (r09, 3 candidates: red 18-0-3 +14..+25, blue 6-0-15 -12..-18). distantCapture is the same (red 16-0-3,
-  blue 4-0-15). A per-layout result on these maps means nothing without the colour split.
-- **Most RANDOM maps are fixed mirrors** (red/blue get +x/-x whatever we change). Only games whose
-  result CHANGES carry signal: run the parent as a same-seed control and compare game by game, both
-  colours, never the same `--seed` in two arenas at once. **Same seed is NOT deterministic**: a
-  never-firing NO-OP matched only 35/60 games of its control and scored 3.3 points lower (r07cand1);
-  a control rerun gave 52.5% then 46.7% (r07cand2). A 60-game same-seed run is +-7 points.
-- **Harness trap:** `arena.play()` with a missing path or one not ending in `.py` prints plausible
-  0 s all-tie results and no error. Check that "secs" looks real.
-- Timing: gate games 3-24 s wall-clock, no warning in ~1300 gate games. A 150-playout defender
-  search hit 0.26-0.30 s per move (r06cand2) - that is the budget scale for playouts.
+- **Builders' own numbers do not replicate, in either direction:** champion vs itself 41.7-54.2%;
+  r09: 52.5/55.5/55.8% (builder) -> 45.0/49.7/49.6% (gate); r10: cand1 51.7% in 30 -> 47.5% in 80,
+  cand2 52.5% in 100 -> 49.2% in 60, cand3 50.0% in 100 -> 46.7% in 90.
+  Rule: under ~100 games trust nothing smaller than ~10 points; under 60, ~20.
+- **Mirror colour bias is on almost every fixed map** (r10, 230 pooled gate games of 3 near-copies vs
+  the tuned champion): crowded red 0-0-9 (-50, conc 62, drop 32) / blue 8-0-1; alley red 8-0-1 / blue
+  0-0-9; default red 1-0-9 / blue 8-0-2; strategic red 0-0-8 / blue 8-0-0; fast red 5-4-0 / blue 0-3-6;
+  office blue 1-0-6 (-42); jumbo red 6-0-2. A per-layout result means nothing without the colour split.
+- **Most RANDOM maps are fixed mirrors** too. Only games whose result CHANGES carry signal: run the
+  parent as a same-seed control, game by game, both colours, never the same `--seed` in two arenas at
+  once. Same seed is NOT deterministic: a 60-game same-seed run is +-7 points.
+- **Harness traps:** `arena.play()` with a missing path or one not ending in `.py` prints plausible
+  0 s all-tie results. Never run two arenas at once (shared `www/` score files -> "UNCLEAN").
+- Timing: gate games 3-24 s wall-clock, no warning in ~1500 gate games. A 150-playout defender
+  search hit 0.26-0.30 s per move (r06cand2); r10cand2's 0.2 s budget peaked at 0.243 s.
 
-## Round 9 (all three from r08cand2; all rejected)
-- **Cause of r08's crowded-red collapse found (r09cand1):** it is specific to r06cand3 (vs champ_r06
-  crowded red is +19 every game). Not the route, not dead ends. Our Pacman carrying 16, 1 step from
-  home, is eaten by an ENEMY PACMAN carrying 24 that steps back over the border and becomes a ghost
-  at the shared middle gap. `_threats` ignores visible enemy Pacmen.
-- **r09cand1 LATENT_D (visible enemy Pacman within 3.5 cols of the border counted as a ghost):
-  rejected, 45.0% in 130.** It fixed crowded red vs r06cand3 (-47 -> +5 in 8) but in the mirror office
-  red went 0-0-6 -31 (deaths 2.5, drop 74/game), and overall drop 8.3/game vs 2.3-3.6 for the other
-  candidates. Treating every enemy Pacman near the border as a wall makes the carrier take worse paths
-  and die. If retried: count only enemy Pacmen that CARRY food and are adjacent to the border, and
-  require office drop not to rise.
-- **r09cand2 SMALLMAP port onto ROUTE: rejected, 49.7% in 190.** Gate small maps: alley 5-1-6 (bank
-  6.5 / conc 6.6), fast 4-6-2. r08cand1's alley 18-0-4 against r06cand3 did not carry over to the ROUTE
-  mirror. Settled: a guard from move 0 on small maps is not a lever against the champion.
-- **r09cand3 sticky turtle + late turtle: rejected, 49.6% in 230.** Late turtle with 150 moves left
-  lost whole trips on jumbo; with 50 moves it rarely fires (~4/30 games); hysteresis is neutral.
-  Settled: neither late-game nor sticky turtling is a lever in the mirror.
-- **Ties are standoffs where nobody scores, not lost leads.** defaultCapture 27 of 30 tied (cand2+3) with
-  bank ~1-3 per side, fast 15 of 28 tied with bank 0-2; tiny red tied 0-0 6/6 (cand2 notes). Ties are
-  ~14% of gate games; a turtle cannot convert them, only banking 1-2 more dots on these maps can.
-- Kill rate stays 0.20-0.25/game in every r09 variant; office red still dies 0.75-1.2 times/game.
+## Round 10 (all three from tune_1117_1652; all rejected)
+- **Ties are now rare under the tuned champion: 9 of 230 gate games (4%)**, down from ~14% in r09.
+  The standoff lever is small.
+- **Standoff cause logged (r10cand1):** on fast, neither side's attackers ever became Pacman in 600
+  moves. The enemy attacker hovers as a ghost 0-1 cells from its border, so every lane dot counts as
+  guarded; our agent steps up, sees it, steps back, loses sight, steps up: a deterministic 2-cycle on
+  both sides. HOVER_ON (a hovering ghost far from us becomes a soft cost, not a threat) was **rejected,
+  47.5% in 80**, bank 27.9 / conc 31.6: it cost bank elsewhere. If retried: a livelock breaker that
+  fires only after our own position 2-cycles >= 8 moves at home carrying 0, small maps only.
+- **Joint defence playout search (r10cand2): rejected, 49.2% in 60 - a NO-OP.** It ran 26 times in
+  100 games and never kept the helper in. The trigger (turtle phase AND chased invader AND
+  `helper_eligible` AND joint margin 1-4) happens ~0.25 times/game. Defence search is NOT the lever
+  while the trigger is this rare; `helper_eligible` blocks most chases in field games.
+- **Border ambush exploiter (r10cand3): rejected, 46.7% in 90.** The champion's carrier does not go
+  home near the border: it eats deep in our half carrying 20-70 dots on big maps (CARRY_STEP 0), and
+  its crossing (min-cost border cell) moves, so a Pacman waiting at one gap rarely strikes (8-11 waits,
+  0-1 strikes/game). Wide trigger: kills 0.47/game but 40%. The weakness is the unbounded deep carry
+  with nobody at home - a ghost that covers ALL exits (`_guard` margin <= 0) is the untried angle.
+
+## Round 9 (from r08cand2; all rejected)
+- **Border ambush on crowded red:** our carrier 1 step from home is eaten by an ENEMY PACMAN that steps
+  back over the border and becomes a ghost at the shared middle gap. `_threats` ignores visible enemy
+  Pacmen. Still present: crowded red conc 62 / drop 32 per game in r10.
+- r09cand1 LATENT_D (every visible enemy Pacman within 3.5 cols of the border = ghost): 45.0% in 130;
+  office red 0-0-6, drop 74/game. If retried: only food-carrying enemy Pacmen adjacent to the border,
+  soft cost, office drop must not rise.
+- Settled: SMALLMAP guard from move 0 (r09cand2, 49.7% in 190); late or sticky turtle (r09cand3, 49.6%).
 
 ## Rounds 6-8, condensed
-- **r08cand2 ROUTE_ON promoted, 57.9% in 170** vs r06cand3: jumbo 10-0-4 +20, office 9-0-3 +9.8,
-  drops 3.0/game vs 5.2. Its crowded-red losses (-43..-56) were the border ambush above.
-- r08cand1 SMALLMAP: 52.0% in 300 vs r06cand3 (alley 18-0-4); did not carry over to ROUTE (r09cand2).
-- r08cand3 EXPLOIT (double attack, then BOTH guard from lead >= 3): 52.3% in 300; crowded 1-0-23,
-  kills 0.17. A single guard from move 0 lost 37.5%: the second invader walks home.
-- **Mirror profile** (r07, 550 games): bank = conc ~30, office drop 20-29/game, jumbo 16, crowded
-  15; kill 0.26-0.33/game; no fixed weak map (apart from the colour bias above).
-- **Rejected, do not retry:** carry-triggered recall while lead < 4 (r07cand1, 35.0%: costs bank 3-7
-  everywhere); load caps (r07cand3 `RUNNER_BANK`, trade drops for bank 1:1); decoy role (50.0% in
-  290); two-invader cover in turtle phase (r07cand2, 50.0% in 260); EXIT_ON exit slack (~50% over 330).
-- r06cand2 defender-only playout search: 42.5% in 40 (fired only when a lone defender could not
-  cover; 0.26-0.30 s/move). Never retried as JOINT search where the joint margin is 1-2.
-- Harness: never run two arenas at once (shared `www/` score files -> "UNCLEAN").
+- r08cand2 ROUTE_ON promoted, 57.9% in 170 vs r06cand3: jumbo +20, office +9.8, drops 3.0/game vs 5.2.
+- r08cand3 EXPLOIT (both guard from lead >= 3): 52.3% in 300; a single guard from move 0 lost 37.5%:
+  the second invader walks home.
+- **Rejected, do not retry:** carry-triggered recall while behind (r07cand1, 35.0%: costs bank 3-7
+  everywhere); load caps (trade drops for bank 1:1); decoy role (50.0% in 290); two-invader cover in
+  turtle phase (r07cand2, 50.0% in 260); EXIT_ON exit slack (~50% over 330).
+- Defence playout search: defender-only r06cand2 42.5% in 40; joint r10cand2 no-op (see above).
 
 ## Defence: what is established
 - **Covering every exit is the lever; chasing is worth nothing.** r04cand1 `_guard`: 71.7% in 30;
   r05cand1 (+ attacker as second jaw, `HELP_ON`): 69.0% in 50 on top. Helper ablation (60 games):
   kills 25 vs 11, conceded 651 vs 1022. Kills happen only when ALL exits are covered.
 - `_guard`/`joint_cover` cover ONE invader (the one carrying most); the mirror sends two.
-- Under the r06+ champions this defence only runs when lead >= 4. Guard exits are every open border
-  cell (14 on the RANDOM404807 pipe map), not the real crossings. `GUARD_CAPS`, `SCARED_GAP` never ablated.
+- This defence only runs when lead >= TURTLE_LEAD (3). Kill rate 0.04-0.2/game in every r10 variant.
+  Guard exits are every open border cell, not the real crossings. `GUARD_CAPS` never ablated.
 
 ## Attacker: what is established
 - Planning + banking beat reflex 90% (r01). **Soft costs beat hard safety rules** (r02: 83.3%; again
@@ -91,20 +89,15 @@ champ_r06 7-0-5, ext_rush 12-0-0, ext_turtle 12-0-0. Round 9: nothing promoted.
   Trip ordering (ROUTE_ON) beat greedy one-dot choice.
 
 ## Known failure patterns
-- **Standoff maps (default, fast, tiny):** both sides bank 0-3, most games tie. Before r06 every
-  version was a coin flip there; opportunistic raiding (48.6%), aggression (20-30%), SMALLMAP guard
-  (r09) all failed. The cause of the zero banking has never been logged.
-- **officeCapture**: the most dots die there (drop 20-74/game, deaths 0.75-2.5 as red).
-- **Big maps are decided by one load**: jumbo swings -105..+87.
-- **Border ambush**: a returning enemy Pacman steps home next to our carrier and eats it (r06cand3
-  does it on crowded). Only a soft, narrow fix is worth trying (see r09cand1).
-- Old (not rechecked under ROUTE): RANDOM566311 red -12 for every version; RANDOM404807 (2-wide
-  border pipe) red -18 for r04cand1.
+- **officeCapture**: the most dots die there (r10 drop 14/game blue, 34/game red; deaths 0.4-0.9).
+- **crowdedCapture red**: border ambush, -50/game in the mirror.
+- **Big maps are decided by one load**: jumbo swings -128..+128 on one seed.
+- **fast/default standoff**: mutual ghost-hover 2-cycle (r10cand1); rare as ties now.
 
 ## Open questions (untested)
-- Why defaultCapture/fast bank ~1: which rule stops our attackers crossing (log it first).
-- Opportunistic kills by an agent that is already home (kill rate 0.2-0.3/game), not a recall.
-- Joint-move playout search for defence where joint margin is 1-2 (KNOWLEDGE sec. 1, 3).
+- Why diana_catana (training field) and ylmiami (held-out) beat us: log bank/conc/deaths per layout.
+- Home intercept: an agent already home with carry 0 cutting off a deep enemy carrier (`_guard` <= 0).
+- Office deaths: which situation kills the carrier (log it first).
 - Shared routes between the two attackers on big maps.
 - Process: same-seed parent control + per-flag ablation is the standard; log layout AND colour next
   to kills / conceded / banked.
