@@ -5,3 +5,7 @@ arena/logs/
 arena/db/
 arena/STOP
 arena/tune/
+# third-party contest entries: local sparring partners only, never committed or copied
+arena/ext_pool/
+arena/bench/
+arena/opponents/ext_gh_*/

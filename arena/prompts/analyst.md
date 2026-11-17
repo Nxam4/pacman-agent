@@ -19,6 +19,14 @@ League: arena/opponents/exploit_rNN are exploiters (area EXPLOIT, prompts/exploi
 champion - their NOTES.md say which weakness they used; arena/opponents/ext_* are external-style
 teams. Every candidate's regression stage plays them. A weakness an exploiter found deserves a
 direction until the champion holds up against it.
+The FIELD: arena/opponents/ext_gh_* are 12 third-party past contest entries. Each candidate that
+passes the SPRT plays them 24 games each, paired with the champion on identical games (field.json
+in its work dir; champion_field.json per round): it must not be measurably worse than the champion
+and must score >= 75% combined. A tuned version that beat the old champion 71.7% head-to-head was
++0.4 +- 2.6 points vs held-out teams: the mirror over-states progress. They are the best proxy for the tournament -
+weight their play stats heavily when choosing directions (e.g. a raider that outscores us -> defence;
+fortresses that hold us to ~0 -> breaking a defended border). NEVER open or read their code, and
+never tell builders to; reason only from game results (academic integrity).
 All past programs and their scores are in arena/db/programs.jsonl (later lines override earlier ones
 with the same id). Builder transcripts are in arena/logs/. Research digest: arena/KNOWLEDGE.md.
 Promoted this round: {{WINNER}}

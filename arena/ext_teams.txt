@@ -1,0 +1,34 @@
+# Third-party contest entries (public forks of the UPF template), used ONLY as local sparring
+# partners. Their code is never committed (gitignored), never copied, and never read by builders.
+# arena/fetch_ext.sh downloads them into arena/ext_pool/<name>/ and copies the `train` ones to
+# arena/opponents/ext_gh_<name>/ (the loop's regression gate + the tuner's pool).
+# `bench` = held-out benchmark (arena/benchmark.sh); the loop and the tuner never play them.
+# Split 2026-11-17 by strength + style (champion's score% vs each, 12 games), one of each pair per side.
+#
+# set    repo                                      score%  style
+train  diana-catana/pacman-agent                 # 58  aggressive raider (outscores us)
+train  Tini4/pacman-agent                        # 75  turtle
+train  vicens-aniol/pacman-agent                 # 75  balanced
+train  gilbernardopacheco01-cmyk/pacman-agent    # 88  ghost hunter (we die 1.3/game)
+train  TeunBoekholt/Anonymous-Sisters            # 83  mixed, many attacks
+train  DimitrijeJanjusevic/Angela-Dimi           # 100 fortress (we win by ~1)
+train  mqrc81/emai-as-pacman-agent               # 100 defensive
+train  renney-11/pacman-agent                    # 92  aggressive
+train  EduTobia24/pacman-agent                   # 100 aggressive, catches our carriers
+train  ananastazi/pacman-agent                   # 100 aggressive
+train  Ivanorf/pacman-agent                      # 92
+train  germananashkin001/pacman-agent            # 92
+bench  uripont/pacman-agent                      # 62  low-scoring, close
+bench  YLMiami/pacman-agent                      # 75  defensive
+bench  a-elena/pacman-agent                      # 83  balanced
+bench  rashomonset/capman                        # 83  (slow: up to 96 s per game)
+bench  AriadnaPrat/pacman-agent                  # 100 fortress (we win by ~5)
+bench  Cambie26/pacman-agent-BonaTarda           # 92  defensive
+bench  lin-cadez/customerSupport                 # 92  aggressive; likely a 2026 competitor
+bench  erikarosenfeld/The-Packstreet-Boys        # 100 aggressive
+bench  MCreeper12731/pacman-agent                # 100 catches our carriers
+bench  cherryneosea/TheDotDominators             # 100 likely a 2026 competitor
+drop   AlejandroPoole/pacman-agent               # 100, +34 avg: no signal
+drop   martigiron01/pacman-agent                 # 100, +31
+drop   WdnLiu/pacman-agent                       # 100, +39
+drop   lizatskhe/pacqueens                       # 96, +36

@@ -8,6 +8,9 @@ export PATH="$HOME/.local/bin:$PATH"
 # shellcheck disable=SC1091
 source venv/bin/activate || exit 1
 mkdir -p arena/logs
+# Two scheduled runs may overlap (the previous one still busy): wait for it instead of starting a
+# second loop on the same work dirs and program database.
+while pgrep -f "bash arena/loop.sh" >/dev/null; do sleep 60; done
 log="arena/logs/loop_$(date '+%Y%m%d_%H%M').log"
 {
   echo "start_loop: $(date '+%F %T')  ROUNDS=${ROUNDS:-4} BUILDERS=${BUILDERS:-3}"

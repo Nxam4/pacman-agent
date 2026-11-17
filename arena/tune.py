@@ -179,9 +179,23 @@ def gate(tuned_src, champion, a, log):
     champs = sorted(glob.glob(os.path.join(OPP_DIR, "champ_*", "my_team.py")))[-2:]
     exps = sorted(glob.glob(os.path.join(OPP_DIR, "exploit_*", "my_team.py")))[-3:]
     exts = sorted(glob.glob(os.path.join(OPP_DIR, "ext_*", "my_team.py")))
-    run_cmd([py, ar, cand, "--opponents", arena.BASELINE] + champs + exps + exts +
-            ["--games", "12", "--seed", "777", "--json", os.path.join(gd, "regress.json")], log)
-    sel = subprocess.run([py, os.path.join(ROOT, "arena", "pick.py"), "--select", "30", "--league-min", "20", gd],
+    field = [x for x in exts if arena.is_ext_gh(x)]
+    league = [x for x in exts if not arena.is_ext_gh(x)]
+    pk = os.path.join(ROOT, "arena", "pick.py")
+    core = os.path.join(gd, "regress_core.json")
+    run_cmd([py, ar, cand, "--opponents", arena.BASELINE] + champs + exps + league +
+            ["--games", "12", "--seed", "777", "--json", core], log)
+    extra = []
+    if field:
+        # field stage (as in loop.sh): candidate and champion on identical games vs the ext_gh_* teams
+        cf = os.path.join(gd, "champion_field.json")
+        for who, out in ((champion, cf), (cand, os.path.join(gd, "field.json"))):
+            run_cmd([py, ar, who, "--opponents"] + field + ["--games", "24", "--seed", "4343", "--json", out], log)
+        subprocess.run([py, pk, "--merge", os.path.join(gd, "regress.json"), core, os.path.join(gd, "field.json")])
+        extra = ["--champ-field", cf]
+    else:
+        shutil.copy(core, os.path.join(gd, "regress.json"))
+    sel = subprocess.run([py, pk, "--select", "30", "--league-min", "20", "--field-min", "75"] + extra + [gd],
                          capture_output=True, text=True)
     for l in sel.stderr.splitlines():
         log("  " + l)
@@ -237,7 +251,7 @@ def main():
                     help="random-walk budget of the whole run, in c units (1 = one int step)")
     ap.add_argument("--pool", nargs="*", help="opponent files for pool steps, or 'auto' "
                                               "(recent champions + exploiters + ext_*)")
-    ap.add_argument("--pool-frac", type=float, default=0.25, help="share of steps played vs the pool")
+    ap.add_argument("--pool-frac", type=float, default=0.5, help="share of steps played vs the pool")
     ap.add_argument("--workers", type=int,
                     default=int(os.environ.get("ARENA_WORKERS", 0)) or max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--batch", type=int, default=0, help="steps per batch (default: workers // 2)")
@@ -249,6 +263,20 @@ def main():
     ap.add_argument("--wait-loop", action="store_true", help="wait (instead of exit) while a loop runs")
     ap.add_argument("--python", default=sys.executable)
     a = ap.parse_args()
+
+    # Wait BEFORE reading the file: a loop running now may promote a new champion, and tuning (and
+    # then promoting over) the old one would undo the loop's work.
+    waited = False
+    while loop_running():
+        if not a.wait_loop:
+            print("arena/loop.sh is running - not tuning now (use --wait-loop to wait for it)")
+            return 3
+        if not waited:
+            print("%s  waiting for arena/loop.sh to finish" % time.strftime("%F %T"), flush=True)
+            waited = True
+        time.sleep(60)
+    if waited:
+        print("%s  loop finished, starting" % time.strftime("%F %T"), flush=True)
 
     src_path = os.path.abspath(a.file)
     src = open(src_path).read()
@@ -275,12 +303,6 @@ def main():
         print(s, flush=True)
         logf.write(s + "\n"); logf.flush()
 
-    while loop_running():
-        if not a.wait_loop:
-            log("arena/loop.sh is running - not tuning now (use --wait-loop to wait for it)")
-            return 3
-        time.sleep(60)
-
     state_path = os.path.join(OUT, "state.json")
     names = [p["name"] for p in params]
     theta = [p["start"] for p in params]
@@ -304,6 +326,9 @@ def main():
     n_total = a.pairs or max(k + 1, int(hours * 3600 / 3.0))   # provisional (~20 steps/min)
     gains = Gains(n_total, a.noise)
     calibrated = bool(a.pairs)
+    k0 = k
+    cal_at = [120] + [f * (deadline - t0) for f in (0.10, 0.25, 0.50, 0.75)] if deadline else []
+    cal_at = sorted(x for x in cal_at if x >= 120)
     rng = random.Random(a.seed + k)
     work = os.path.join(OUT, "work")
     os.makedirs(work, exist_ok=True)
@@ -314,9 +339,12 @@ def main():
            "%d opponents, %.0f%% of steps" % (len(pool), 100 * a.pool_frac) if pool else "none (self-play)"))
 
     def pick_opp():
+        # PFSP on a margin-aware score: a game won by 1 point counts ~0.55, by 20+ points ~1.0, so
+        # fortresses we beat narrowly every time still get played (pure win-rate would skip them).
         def w(o):
             s = opp_stats.get(o, [0.0, 0])
-            p = (s[0] + 1.0) / (s[1] + 2.0)
+            soft = s[2] if len(s) > 2 else s[0]
+            p = (soft + 1.0) / (s[1] + 2.0)
             return p * (1 - p) + 0.02
         ws = [w(o) for o in pool]
         x = rng.random() * sum(ws)
@@ -364,10 +392,13 @@ def main():
                     bad_p = not all(side_ok(r, True) for r in gp)
                     bad_m = not all(side_ok(r, True) for r in gm)
                     result = (sum(map(game_points, gp)) - sum(map(game_points, gm))) / 2.0
-                    st = opp_stats.setdefault(opp, [0.0, 0])
+                    st = opp_stats.setdefault(opp, [0.0, 0, 0.0])
+                    if len(st) < 3:
+                        st.append(st[0])
                     for r in gp + gm:
                         st[0] += 1.0 if r["cand_score"] > 0 else (0.5 if r["cand_score"] == 0 else 0.0)
                         st[1] += 1
+                        st[2] += 0.5 + 0.5 * math.tanh(r["cand_score"] / 10.0)
                     g = gp + gm
                 else:
                     g = res[first:first + 2]
@@ -387,11 +418,17 @@ def main():
                     theta[j] = clamp(p, theta[j] + gains.step(step, p) * result * delta[j])
                 played += 1
             k += len(steps)
-            if not calibrated and time.time() - t0 > 120 and deadline:
-                rate = k / (time.time() - t0)                     # steps per second, measured
-                n_total = max(k + 1, int(k + rate * (deadline - time.time())))
-                gains = Gains(n_total, a.noise)
-                calibrated = True
+            # Calibrate the step count to the budget after 2 min, then re-measure at 10/25/50/75% of
+            # it: the first minutes run slower (5 h run on 2026-11-17 finished ~1 h early otherwise).
+            el = time.time() - t0
+            if not calibrated and deadline and cal_at and el > cal_at[0]:
+                while cal_at and el > cal_at[0]:
+                    cal_at.pop(0)
+                rate = (k - k0) / el                              # steps per second, measured
+                new_total = max(k + 1, int(k + rate * (deadline - time.time())))
+                if abs(new_total - n_total) > 0.02 * n_total:
+                    n_total = new_total
+                    gains = Gains(n_total, a.noise)
                 log("calibrated: %.1f steps/min -> %d steps in the budget" % (rate * 60, n_total))
             json.dump({"file": src_path, "sha": sha, "names": names, "theta": theta, "k": k,
                        "n_total": n_total, "opp_stats": opp_stats}, open(state_path, "w"))

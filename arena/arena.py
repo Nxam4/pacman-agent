@@ -143,7 +143,12 @@ def run_jobs(jobs, workers, python):
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
-def run(candidate, opponents, games_per_opp, seed, workers, python):
+def is_ext_gh(opp):
+    """Third-party training opponent (arena/opponents/ext_gh_*)."""
+    return os.path.basename(os.path.dirname(opp)).startswith("ext_gh_")
+
+
+def run(candidate, opponents, games_per_opp, seed, workers, python, ext_games=None):
     rng = random.Random(seed)
     jobs = []
     gid = 0
@@ -151,7 +156,8 @@ def run(candidate, opponents, games_per_opp, seed, workers, python):
         # Games come in colour-swapped pairs on the same layout (cancels map/colour asymmetry).
         # Pairs alternate fixed layout / random layout, cycling through ALL fixed layouts.
         layout = None
-        for i in range(games_per_opp):
+        n = ext_games if ext_games and is_ext_gh(opp) else games_per_opp
+        for i in range(n):
             if i % 2 == 0:
                 layout = pair_layout(i // 2, seed, rng)
             jobs.append((candidate, opp, i % 2 == 0, layout, gid))
@@ -266,6 +272,8 @@ def main():
     ap.add_argument("--opponents", nargs="*", help="team files (default: baseline + arena/opponents/*.py)")
     ap.add_argument("--games", type=int, default=16, help="games per opponent")
     ap.add_argument("--quick", action="store_true", help="8 games per opponent")
+    ap.add_argument("--ext-games", type=int, default=0,
+                    help="games per third-party training opponent (arena/opponents/ext_gh_*); default --games")
     ap.add_argument("--seed", type=int, default=0)
     # ARENA_WORKERS lets the loop share the CPU between parallel builders; oversubscribing the
     # CPU inflates move times and produces fake timeout warnings.
@@ -296,7 +304,7 @@ def main():
         results, sprt = run_sprt(cand, opps[0], a)
     else:
         n = 8 if a.quick else a.games
-        results = run(cand, opps, n, a.seed, a.workers, a.python)
+        results = run(cand, opps, n, a.seed, a.workers, a.python, a.ext_games)
     summary = summarise(results)
 
     print(f"{'opponent':<28}{'W':>4}{'T':>4}{'L':>4}{'pts%':>7}{'score%':>7}{'avg':>7}{'crash':>7}"

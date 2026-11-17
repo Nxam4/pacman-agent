@@ -16,6 +16,8 @@ pacman-agent/
     opponents/champ_*/  <- frozen past champions (created by the loop)
     opponents/exploit_*/ <- league: exploiters that beat a champion (created by the loop)
     opponents/ext_*/    <- league: teams of a different style (ext_rush, ext_turtle; add your own)
+    opponents/ext_gh_*/ <- the FIELD: 12 third-party past contest entries (gitignored, fetch_ext.sh)
+    ext_teams.txt, fetch_ext.sh, benchmark.sh  <- train/bench split of third-party teams, held-out benchmark
     LEARNINGS.md, directions.txt (created by the loop, rewritten by the analyst)
 ```
 
@@ -65,7 +67,12 @@ database, so deleting `arena/work/rNN` by hand never makes the loop reuse a roun
      16-300 games, bounds [50%, 55%];
    - regression: 12 games each vs the baseline, the 2 most recent past champions (score >= 30%
      against each) and the league: the 3 most recent exploiters and every `ext_*` team (>= 20%:
-     they may beat the champion legitimately, so only a collapse counts).
+     they may beat the champion legitimately, so only a collapse counts);
+   - **field**: 24 games each vs the 12 third-party training teams (`ext_gh_*`). The champion
+     plays the identical games once per round. The candidate must not be measurably worse (the
+     paired 95% interval may not be entirely below 0) and must score >= 75% combined. This stage
+     exists because, on 2026-11-17, a tuned version that beat the old champion 71.7% head-to-head
+     was +0.4 +- 2.6 points against held-out teams.
 4. **Promote** the passing candidate with the best SPRT score: freeze the old champion and commit.
    An exploiter whose SPRT beat the champion (and was not itself promoted) is frozen into
    `arena/opponents/exploit_rNN/` with its NOTES: from then on every candidate plays it.
@@ -113,6 +120,7 @@ warnings. Run it between loop runs, for example while the Claude usage limit res
 - `SPRT_ALPHA`/`SPRT_BETA`: 0.05/0.10. `SPRT_MAX`: 300 games.
 - `REGRESS_GAMES`/`REGRESS_MIN`: 12 games, 30% score vs the baseline and each recent champion.
   This is a collapse check, not a strength test. `REGRESS_LEAGUE_MIN`: 20% vs league opponents.
+  `FIELD_GAMES`/`REGRESS_FIELD_MIN`: 24 paired games per `ext_gh_*` team, 75% combined.
 - `CHAMPS_IN_GATE`: recent champions in the regression stage, 2. `LEAGUE_EXPLOITS`: recent
   exploiters in it, 3.
 - `EXPLOIT_EVERY`: exploiter every Nth round, 2 (0 = off; needs BUILDERS >= 2).
@@ -124,10 +132,24 @@ warnings. Run it between loop runs, for example while the Claude usage limit res
 - `BUILDER_WORKERS`: arena workers per builder, default nproc/BUILDERS.
 - `CLAUDE_FLAGS`: replaces the permission flags; `--model` is always passed separately.
 
-## Adding outside opponents
-Put any team file at `arena/opponents/ext_<name>/my_team.py`, for example a fellow competitor's
-agent or an old UPF-format contest team. It joins every regression stage and builder context
-automatically. These are local test opponents only: never copy their code into `my_team.py`.
+## Outside opponents: training set and held-out benchmark
+26 public forks of the UPF template hold past contest entries in the same API. `arena/ext_teams.txt`
+splits them, by strength and style (one of each matched pair per side), into:
+- **train** (12): `bash arena/fetch_ext.sh` downloads every team into `arena/ext_pool/` (pinned to a
+  commit) and installs these as `arena/opponents/ext_gh_*`. The loop's regression stage and the
+  tuner's pool play them.
+- **bench** (10): the held-out benchmark. The loop and the tuner never play them.
+  `bash arena/benchmark.sh` plays the champion and the previous champion on identical games
+  (24 per team) and prints both scores and the paired difference with a 95% interval. If the gate
+  and tuner scores rise while the benchmark stays flat or drops, the loop is overfitting. Run it
+  nightly or before a push, and never use it to choose between candidates.
+- **drop** (4): beaten by 30+ points, no signal.
+
+Rules: their code is gitignored and never committed, copied or read (builder, exploiter and analyst
+prompts forbid it). We only play against them. The repos have no licence and the organisers can
+compare submissions with earlier years' entries.
+
+You can still add any team by hand at `arena/opponents/ext_<name>/my_team.py`: it joins the league.
 After the test round (23 Nov), the teams and layouts we lost to are the best additions.
 
 Manual SPRT of any file against the champion:

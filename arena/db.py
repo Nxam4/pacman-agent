@@ -316,13 +316,25 @@ def cmd_context(a):
     for r in sorted(league, key=lambda r: r.get("round", 0), reverse=True)[:6]:
         out.append("- `%s/my_team.py` - exploiter from round %s that BEAT the champion of its round: %s. "
                    "Its idea: %s" % (r["frozen"], r.get("round"), fmt(r), r.get("direction", "")[:200]))
+    gh = [d for d in exts if d.startswith("ext_gh_")]
     for d in exts:
-        out.append("- `arena/opponents/%s/my_team.py` - external team (different style)" % d)
+        if d not in gh:
+            out.append("- `arena/opponents/%s/my_team.py` - external team (different style)" % d)
+    if gh:
+        out.append("- %d third-party teams (past contest entries; arena/opponents/ext_gh_*). PLAY against "
+                   "them, NEVER open or read their code (academic integrity). The gate needs a combined "
+                   "score >= the field minimum vs them." % len(gh))
     champ = by_id(recs, cid) or {}
     cby = (champ.get("regress") or {}).get("by_opponent") or {}
-    lby = dict((k, v) for k, v in cby.items() if "/exploit_" in k or "/ext_" in k)
+    lby = dict((k, v) for k, v in cby.items() if ("/exploit_" in k or "/ext_" in k) and "/ext_gh_" not in k)
     if lby:
         out.append("Champion's regression score%% vs these when it was promoted: %s" % lby)
+    fby = dict((k.split("/ext_gh_")[-1], v) for k, v in cby.items() if "/ext_gh_" in k)
+    if fby:
+        out.append("Champion vs the third-party teams (score%%, per game: bank/conc/died/drop/kill): %s" % ", ".join(
+            "%s %s%% %s" % (k, v.get("score_pct"), "/".join(str((v.get("play") or {}).get(x, "-"))
+                                                            for x in ("banked", "conceded", "deaths", "dropped", "kills")))
+            for k, v in sorted(fby.items())))
     out.append("")
 
     bad = ("unchanged", "invalid", "smoke_fail", "unclean", "rejected", "regress_fail")

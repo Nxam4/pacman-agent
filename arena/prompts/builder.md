@@ -15,6 +15,9 @@ Your file: {{FILE}}
 It starts as a copy of the program named in {{CONTEXT}} (usually the current champion). Edit ONLY
 this file and {{NOTES}}.
 Do not touch my_team.py, arena/*.py, arena/opponents/, arena/snippets/, or anything under pacman-contest/.
+NEVER open, read, grep or copy files under arena/opponents/ext_gh_* or arena/ext_pool/ - they are
+other students' contest entries; you may only PLAY against them (pass the path to arena.py). Reading
+them would be an academic-integrity violation that could disqualify the team.
 To keep a backup before a risky change: cp {{FILE}} {{FILE}}.bak  (restore with cp the other way).
 
 Goal: make {{FILE}} beat the current champion more often, without ever crashing, forfeiting, or
@@ -24,7 +27,13 @@ getting a timeout warning. After you finish, an evaluation cascade runs:
      game pairs are played until it is statistically clear whether your file scores >= 55% (win 1,
      tie 0.5) or is no better - 16 to 300 games; big improvements are decided fast;
   3. 12 regression games each vs the baseline, recent past champions and the LEAGUE (exploiters that
-     once beat a champion, and external-style teams in arena/opponents/ext_*): must not collapse.
+     once beat a champion, and external-style teams in arena/opponents/ext_*): must not collapse;
+  4. the FIELD: 24 games each vs 12 third-party past contest entries (arena/opponents/ext_gh_*),
+     and the champion plays the identical games; your file must not be measurably worse than the
+     champion against them, and must score >= 75% combined. These are the real field - a tuned
+     version that beat the old champion 71.7% head-to-head was no better against outside teams, so
+     a mirror-only gain is not progress. Check yours (and the champion, same seed) with
+        python3 arena/arena.py {{FILE}} --opponents arena/opponents/ext_gh_*/my_team.py --games 4 --seed 1
 Every evaluated program is archived with its scores; an inconclusive near-miss may be continued by a
 builder next round, so even a partial success is useful. A file identical to its start is skipped.
 
@@ -65,7 +74,7 @@ Engineering rules (each has lost games before):
   spend it on logic.
 
 Before you finish:
-- Run one final  python3 arena/arena.py {{FILE}} --games 16  (all opponents) and confirm
+- Run one final  python3 arena/arena.py {{FILE}} --games 8  (all opponents) and confirm
   crash = 0, slow = 0 and forfeit = 0.
 - Finalise {{NOTES}}: what you tried, the measured results of each idea (including failures, with the
   numbers), and what you'd try next. Be concrete and short; the analyst agent reads this.

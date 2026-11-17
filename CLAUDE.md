@@ -35,6 +35,9 @@ The organisers clone this repo and load `my_team.py` from its root. Test round: 
   Results are noisy: under ~30 games, only trust large differences.
 - Numeric constants live in top-level `NAME = number` lines; `arena/tune.py` tunes them (SPSA).
 - `arena/opponents/exploit_*` and `ext_*` are league opponents of a different style (not our lineage).
+- `arena/opponents/ext_gh_*` (training) and `arena/ext_pool/` (held-out benchmark, `arena/benchmark.sh`)
+  are other students' past contest entries: play against them only. Never open, read or copy their
+  code (academic integrity). They are gitignored, so never commit them.
 - `arena/opponents/champ_*/my_team.py` are frozen past champions; a new version must not regress
   against them.
 - `arena/LEARNINGS.md` - accumulated findings. Read it before changing strategy.

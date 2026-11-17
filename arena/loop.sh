@@ -31,6 +31,10 @@ REGRESS_MIN=${REGRESS_MIN:-30}        #   score % needed vs the baseline and eac
                                       #   a 50% team falls below 30% in 12 games only ~2% of the time)
 REGRESS_LEAGUE_MIN=${REGRESS_LEAGUE_MIN:-20}  # ... vs league opponents (exploiters beat the champion by
                                       #   construction, so only a collapse counts)
+FIELD_GAMES=${FIELD_GAMES:-24}        # stage 4 (field): games per third-party training team (ext_gh_*),
+                                      #   candidate and champion on identical games; the candidate must
+                                      #   not be measurably worse (paired 95% interval not below 0) and
+REGRESS_FIELD_MIN=${REGRESS_FIELD_MIN:-75}   # ... must score >= this % combined (champion ~88%)
 CHAMPS_IN_GATE=${CHAMPS_IN_GATE:-2}   # most recent frozen champions in the regression stage
 LEAGUE_EXPLOITS=${LEAGUE_EXPLOITS:-3} # most recent frozen exploiters in it (+ every arena/opponents/ext_*)
 EXPLOIT_EVERY=${EXPLOIT_EVERY:-2}     # every Nth round the last builder is an exploiter (0 = never)
@@ -156,7 +160,7 @@ EOF
   commit "Round $1: learnings" arena/LEARNINGS.md arena/directions.txt
 }
 
-echo "models=${BUILDER_MODELS} analyst=$ANALYST_MODEL builders=$BUILDERS workers/builder=$BUILDER_WORKERS smoke=$SMOKE_GAMES sprt=[$SPRT_S0,$SPRT_S1] a=$SPRT_ALPHA b=$SPRT_BETA max=$SPRT_MAX regress=${REGRESS_GAMES}@${REGRESS_MIN}%/league ${REGRESS_LEAGUE_MIN}% exploit_every=$EXPLOIT_EVERY timeout=$BUILDER_TIMEOUT"
+echo "models=${BUILDER_MODELS} analyst=$ANALYST_MODEL builders=$BUILDERS workers/builder=$BUILDER_WORKERS smoke=$SMOKE_GAMES sprt=[$SPRT_S0,$SPRT_S1] a=$SPRT_ALPHA b=$SPRT_BETA max=$SPRT_MAX regress=${REGRESS_GAMES}@${REGRESS_MIN}%/league ${REGRESS_LEAGUE_MIN}%/field ${FIELD_GAMES}g paired+${REGRESS_FIELD_MIN}% exploit_every=$EXPLOIT_EVERY timeout=$BUILDER_TIMEOUT"
 db seed my_team.py
 # Next round = after the highest round seen in arena/work/ OR in the program DB (work dirs can be
 # deleted by hand; reusing a round number would overwrite DB records and frozen champions).
@@ -198,7 +202,7 @@ for ((r = start_round + 1; r <= start_round + ROUNDS; r++)); do
     [ -n "$ex" ] || ex="EXPLOIT: read the champion's code and the layouts it lost on, pick its biggest weakness, and build a team (any style) that beats it."
     DIRS+=("$ex")
   fi
-  pids=()
+  pids=(); build_t0=$(date +%s)
   for i in "${!DIRS[@]}"; do
     n=$((i + 1)); w="arena/work/$R/cand_$n"; mkdir -p "$w"
     dir=${DIRS[$i]}; area=$(printf '%s' "${dir%%:*}" | tr -cd 'A-Za-z_-' | cut -c1-24); [ -n "$area" ] || area=MISC
@@ -242,6 +246,17 @@ ${dir}"
     fi
     echo ">>> Claude usage limit hit mid-round - evaluating what the builders produced, then stopping."
   fi
+  # Every builder gave up within minutes without changing anything: Claude itself failed (model
+  # unavailable, logged out, network, CLI error). Stop instead of burning rounds on "unchanged".
+  changed=0
+  for w in arena/work/$R/cand_*; do cmp -s "$w/my_team.py" "$w/parent.py" || changed=1; done
+  if [ "$changed" = 0 ] && [ $(( $(date +%s) - build_t0 )) -lt 300 ]; then
+    echo ">>> All builders exited within 5 min without changes - Claude failed (model '$MODEL' unavailable,"
+    echo "    not logged in, or network?). Round $R discarded, stopping. Builder 1 log tail:"
+    tail -5 "arena/logs/${R}_cand_1.log" | sed 's/^/    /'
+    rm -rf "arena/work/$R"; rm -f arena/logs/${R}_*
+    break
+  fi
 
   # ---- 2. evaluation cascade: smoke -> SPRT vs champion -> regression --------------------
   past=(arena/opponents/champ_*/my_team.py)
@@ -250,7 +265,13 @@ ${dir}"
   exps=(arena/opponents/exploit_*/my_team.py)
   league=("${exps[@]: -$LEAGUE_EXPLOITS}")
   [ "${#exps[@]}" -le "$LEAGUE_EXPLOITS" ] && league=("${exps[@]}")
-  league+=(arena/opponents/ext_*/my_team.py)
+  for f in arena/opponents/ext_*/my_team.py; do
+    case "$f" in */ext_gh_*) ;; *) league+=("$f") ;; esac      # ext_gh_* = the field stage below
+  done
+  field=(arena/opponents/ext_gh_*/my_team.py)
+  champ_field=arena/work/$R/champion_field.json
+  pick_args=(--league-min "$REGRESS_LEAGUE_MIN" --field-min "$REGRESS_FIELD_MIN")
+  [ "${#field[@]}" -gt 0 ] && pick_args+=(--champ-field "$champ_field")
   passed=()
   for w in arena/work/$R/cand_*; do
     if cmp -s "$w/my_team.py" "$w/parent.py"; then status=unchanged
@@ -274,22 +295,37 @@ ${dir}"
     fi
     if [ "$status" = passed ]; then
       $PY arena/arena.py "$w/my_team.py" --opponents pacman-contest/src/contest/baseline_team.py "${recent[@]}" \
-          "${league[@]}" --games "$REGRESS_GAMES" --seed $((r + 500)) --json "$w/regress.json" \
+          "${league[@]}" --games "$REGRESS_GAMES" --seed $((r + 500)) --json "$w/regress_core.json" \
           | tee "$w/regress.txt" || true
+      if [ "${#field[@]}" -gt 0 ]; then
+        # field stage: candidate and champion on identical games vs the third-party training teams
+        if [ ! -s "$champ_field" ]; then
+          echo "champion vs the field (once per round, ${#field[@]} teams x $FIELD_GAMES games)"
+          $PY arena/arena.py my_team.py --opponents "${field[@]}" --games "$FIELD_GAMES" --seed $((r + 700)) \
+              --json "$champ_field" > "arena/work/$R/champion_field.txt" || true
+        fi
+        echo "$w: field (${#field[@]} teams x $FIELD_GAMES games, paired with the champion)"
+        $PY arena/arena.py "$w/my_team.py" --opponents "${field[@]}" --games "$FIELD_GAMES" --seed $((r + 700)) \
+            --json "$w/field.json" | tee "$w/field.txt" || true
+        $PY arena/pick.py --merge "$w/regress.json" "$w/regress_core.json" "$w/field.json" \
+          || cp "$w/regress_core.json" "$w/regress.json"
+      else
+        cp "$w/regress_core.json" "$w/regress.json"
+      fi
       passed+=("$w")
     fi
     echo "$w: $status"
     printf '%s\n' "$status" > "$w/status"
   done
   winner=""
-  [ "${#passed[@]}" -gt 0 ] && winner=$($PY arena/pick.py --select "$REGRESS_MIN" --league-min "$REGRESS_LEAGUE_MIN" "${passed[@]}" || true)
+  [ "${#passed[@]}" -gt 0 ] && winner=$($PY arena/pick.py --select "$REGRESS_MIN" "${pick_args[@]}" "${passed[@]}" || true)
 
   # ---- 3. archive every candidate in the program DB, promote the winner --------------------
   for w in arena/work/$R/cand_*; do
     st=$(cat "$w/status")
     if [ "$st" = passed ]; then
       if [ -n "$winner" ] && [ "$(dirname "$winner")" = "$w" ]; then st=passed
-      elif $PY arena/pick.py --select "$REGRESS_MIN" --league-min "$REGRESS_LEAGUE_MIN" "$w" 2>/dev/null | grep -q .; then st=not_chosen
+      elif $PY arena/pick.py --select "$REGRESS_MIN" "${pick_args[@]}" "$w" 2>/dev/null | grep -q .; then st=not_chosen
       else st=regress_fail; fi
     fi
     db add "${R}$(basename "$w" | tr -d '_')" "$r" "$st" "$w/my_team.py" \
