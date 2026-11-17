@@ -11,27 +11,27 @@ import heapq
 import contest.util as util
 
 DEBUG = False
-HIDDEN_W = 3.0      # soft cost per unit of hidden-defender belief proximity
-CLUSTER_W = 0.5     # bonus per neighbouring dot when choosing a food target
-CARRY_BUDGET = 12   # max path cost to the next dot when carrying nothing
-CARRY_STEP = 2      # ... shrinks by this per carried dot
+HIDDEN_W = 2.864      # soft cost per unit of hidden-defender belief proximity
+CLUSTER_W = 0.4808     # bonus per neighbouring dot when choosing a food target
+CARRY_BUDGET = 16   # max path cost to the next dot when carrying nothing
+CARRY_STEP = 0      # ... shrinks by this per carried dot
 SAFE_RETURN = False  # eat a dot only if a safe way home / to a capsule exists afterwards
 INVADER_SNAP = True # at home with nothing carried: eat an invader within 3 steps
 GUARD_CAPS = True   # defender also covers our capsules against a chased invader
 SCARED_GAP = 2     # scared defender keeps exactly this distance from the invader while blocking
 HELP_ON = True    # attacker joins the defender's exit cover as a second jaw (from r04cand2)
 TRAP_ON = True      # invader inside a dead-end branch on our side: defender holds its mouth
-HELP_MIN_CARRY = 3  # helper joins for an invader carrying at least this many ...
-HELP_NEAR = 8       # ... or any invader within this many steps of the (at-home) attacker
-HELP_BORDER = 6     # attacker may come back from at most this far into the enemy side
-HELP_MAX_CARRY = 2  # ... and only while carrying at most this many
+HELP_MIN_CARRY = 2  # helper joins for an invader carrying at least this many ...
+HELP_NEAR = 7       # ... or any invader within this many steps of the (at-home) attacker
+HELP_BORDER = 4     # attacker may come back from at most this far into the enemy side
+HELP_MAX_CARRY = 0  # ... and only while carrying at most this many
 DOUBLE_ATTACK = 1   # both agents attack
 LANE_SPLIT = 1      # split food top/bottom between the two attackers
 ROUTE_ON = 1        # attacker orders a trip of several dots + return (no ghost near) and steers by it
-ROUTE_K = 6         # max dots in a planned trip
-ROUTE_FIRST = 8     # first-dot candidates tried (best by the greedy value)
+ROUTE_K = 8         # max dots in a planned trip
+ROUTE_FIRST = 5     # first-dot candidates tried (best by the greedy value)
 ROUTE_GHOST = 6     # route only while no active visible defender is within this distance
-ROUTE_STICK = 1.1   # hysteresis: ratio bonus for keeping the previous first dot
+ROUTE_STICK = 1.252   # hysteresis: ratio bonus for keeping the previous first dot
 PINCER_LOG_PATH = ''  # dev only: per-game kills / conceded log ('' = off; env PINCER_LOG overrides)
 
 from contest.capture_agents import CaptureAgent
@@ -1054,7 +1054,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         return best
 
 
-TURTLE_LEAD = 4     # lead at which the team switches from double attack to guard + attacker
+TURTLE_LEAD = 3     # lead at which the team switches from double attack to guard + attacker
 
 
 class HybridAgent(OffensiveReflexAgent):
