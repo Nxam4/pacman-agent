@@ -27,6 +27,11 @@ HELP_BORDER = 6     # attacker may come back from at most this far into the enem
 HELP_MAX_CARRY = 2  # ... and only while carrying at most this many
 DOUBLE_ATTACK = 1   # both agents attack
 LANE_SPLIT = 1      # split food top/bottom between the two attackers
+ROUTE_ON = 1        # attacker orders a trip of several dots + return (no ghost near) and steers by it
+ROUTE_K = 6         # max dots in a planned trip
+ROUTE_FIRST = 8     # first-dot candidates tried (best by the greedy value)
+ROUTE_GHOST = 6     # route only while no active visible defender is within this distance
+ROUTE_STICK = 1.1   # hysteresis: ratio bonus for keeping the previous first dot
 PINCER_LOG_PATH = ''  # dev only: per-game kills / conceded log ('' = off; env PINCER_LOG overrides)
 
 from contest.capture_agents import CaptureAgent
@@ -951,12 +956,70 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                                      - 0.3 * dist(pos, b))
                 if target is None or target == pos:
                     return self._escape(game_state, pos, visible, soft)
+        if ROUTE_ON and target is not None and target == best_food and not powered and \
+                (near_threat is None or near_threat > ROUTE_GHOST):
+            try:
+                rt = self._route(cands, cost, carrying, moves_left)
+                if rt is not None:
+                    target = rt
+            except Exception:
+                pass
+        else:
+            self._route_first = None
         if target == pos:
             return Directions.STOP
         a = self._first_action(pos, target, parent)
         if a is None:
             return self._escape(game_state, pos, visible, soft)
         return a
+
+    def _route(self, cands, cost, carrying, moves_left):
+        """Trip planning: for each of the best ROUTE_FIRST first dots, chain up to ROUTE_K dots by
+        nearest neighbour (each leg within the carry budget), close with the shortest return to the
+        border, and score the best prefix by dots / trip length. Returns the first dot of the best
+        trip (or None)."""
+        if not cands:
+            return None
+        dist = self.get_maze_distance
+        pool = [f for _, f in cands]
+        ret = {}
+        for f in pool:
+            ret[f] = min(dist(f, b) for b in self.border)
+        prev = getattr(self, '_route_first', None)
+        best, best_r = None, None
+        for _, f0 in cands[:ROUTE_FIRST]:
+            c = carrying
+            if c > 0 and cost[f0] > max(2, CARRY_BUDGET - CARRY_STEP * c):
+                continue
+            length = cost[f0]
+            k = 1
+            c += 1
+            cur = f0
+            left = [f for f in pool if f != f0]
+            r = k / (length + ret[f0] + 1.0)
+            while k < ROUTE_K and left:
+                budget = max(2, CARRY_BUDGET - CARRY_STEP * c)
+                nxt, nd = None, None
+                for f in left:
+                    d = dist(cur, f)
+                    if nd is None or d < nd:
+                        nxt, nd = f, d
+                if nxt is None or nd > budget or length + nd + ret[nxt] + 2 >= moves_left:
+                    break
+                length += nd
+                k += 1
+                c += 1
+                cur = nxt
+                left.remove(nxt)
+                rr = k / (length + ret[nxt] + 1.0)
+                if rr > r:
+                    r = rr
+            if f0 == prev:
+                r *= ROUTE_STICK
+            if best_r is None or r > best_r:
+                best, best_r = f0, r
+        self._route_first = best
+        return best
 
     def _escape(self, game_state, pos, visible, soft):
         """No guaranteed-safe plan: take the least bad route home (or just keep away)."""
