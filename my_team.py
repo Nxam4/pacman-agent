@@ -19,12 +19,14 @@ SAFE_RETURN = False  # eat a dot only if a safe way home / to a capsule exists a
 INVADER_SNAP = True # at home with nothing carried: eat an invader within 3 steps
 GUARD_CAPS = True   # defender also covers our capsules against a chased invader
 SCARED_GAP = 2     # scared defender keeps exactly this distance from the invader while blocking
-HELP_ON = True      # attacker joins the defender's exit cover as a second jaw (from r04cand2)
+HELP_ON = True    # attacker joins the defender's exit cover as a second jaw (from r04cand2)
 TRAP_ON = True      # invader inside a dead-end branch on our side: defender holds its mouth
 HELP_MIN_CARRY = 3  # helper joins for an invader carrying at least this many ...
 HELP_NEAR = 8       # ... or any invader within this many steps of the (at-home) attacker
 HELP_BORDER = 6     # attacker may come back from at most this far into the enemy side
 HELP_MAX_CARRY = 2  # ... and only while carrying at most this many
+DOUBLE_ATTACK = 1   # both agents attack
+LANE_SPLIT = 1      # split food top/bottom between the two attackers
 PINCER_LOG_PATH = ''  # dev only: per-game kills / conceded log ('' = off; env PINCER_LOG overrides)
 
 from contest.capture_agents import CaptureAgent
@@ -480,6 +482,10 @@ def create_team(first_index, second_index, is_red,
     any extra arguments, so you should make sure that the default
     behavior is what you want for the nightly contest.
     """
+    if DOUBLE_ATTACK:
+        a, b = HybridAgent(first_index), HybridAgent(second_index)
+        a.lane, b.lane = 0, 1
+        return [a, b]
     return [eval(first)(first_index), eval(second)(second_index)]
 
 
@@ -656,7 +662,8 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                     self.tracker.update(self, game_state)
                 except Exception:
                     pass
-            if HELP_ON and getattr(self, 'geo', None) is not None:
+            if HELP_ON and getattr(self, 'geo', None) is not None and \
+                    (getattr(self, 'lane', None) is None or self._turtle(game_state)):
                 try:
                     a = attacker_help(self, game_state, self.geo)
                 except Exception:
@@ -797,6 +804,13 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         st = game_state.get_agent_state(self.index)
         carrying = st.num_carrying
         food = self.get_food(game_state).as_list()
+        lane = getattr(self, 'lane', None)
+        if LANE_SPLIT and lane is not None and len(food) > 4 and not self._turtle(game_state):
+            mids = sorted(f[1] for f in food)
+            ym = mids[len(mids) // 2]
+            mine = [f for f in food if (f[1] >= ym) == (lane == 0)]
+            if len(mine) >= 3:
+                food = mine
         caps = list(self.get_capsules(game_state))
         moves_left = game_state.data.timeleft // 4
         at_home = self._home(pos)
@@ -906,6 +920,8 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                         budget = min(budget, 2)
                     if best_cost > budget:
                         go_home = True
+            if getattr(self, '_force_home', False):
+                go_home = True
             # capsule when a defender is close and awake (KNOWLEDGE 2.5)
             if best_cap is not None and not powered and near_threat is not None and near_threat <= 6:
                 target = best_cap
@@ -973,6 +989,66 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
             if best_v is None or v > best_v:
                 best, best_v = a, v
         return best
+
+
+TURTLE_LEAD = 4     # lead at which the team switches from double attack to guard + attacker
+
+
+class HybridAgent(OffensiveReflexAgent):
+    """Double attacker (lanes) that, once ahead by TURTLE_LEAD, becomes the champion's structure:
+    lane 0 = exit-cover defender, lane 1 = attacker + helper."""
+
+    def register_initial_state(self, game_state):
+        OffensiveReflexAgent.register_initial_state(self, game_state)
+        self._force_home = False
+        self.exits, self.home_cells = [], set()
+        try:
+            walls = game_state.get_walls()
+            mid = walls.width // 2
+            x = mid - 1 if self.red else mid
+            ex = x + 1 if self.red else x - 1
+            self.exits = [(x, y) for y in range(walls.height) if not walls[x][y] and not walls[ex][y]]
+            for cx in (range(0, mid) if self.red else range(mid, walls.width)):
+                for cy in range(walls.height):
+                    if not walls[cx][cy]:
+                        self.home_cells.add((cx, cy))
+        except Exception:
+            self.exits = []
+
+    def _turtle(self, game_state):
+        try:
+            return self.get_score(game_state) >= TURTLE_LEAD
+        except Exception:
+            return False
+
+    def choose_action(self, game_state):
+        legal = game_state.get_legal_actions(self.index)
+        self._force_home = False
+        try:
+            if getattr(self, 'lane', None) == 0 and self._turtle(game_state):
+                if self.tracker is not None:
+                    try:
+                        self.tracker.update(self, game_state)
+                    except Exception:
+                        pass
+                st = game_state.get_agent_state(self.index)
+                if not st.is_pacman:
+                    try:
+                        a = DefensiveReflexAgent._guard(self, game_state)
+                    except Exception:
+                        a = None
+                    if a is not None and a in legal:
+                        return a
+                    return Directions.STOP if Directions.STOP in legal else legal[0]
+                self._force_home = True
+                if self.ready:
+                    a = self._choose(game_state)
+                    if a in legal:
+                        return a
+        except Exception:
+            pass
+        self._force_home = False
+        return OffensiveReflexAgent.choose_action(self, game_state)
 
 
 class _OldOffensiveReflexAgent(ReflexCaptureAgent):
