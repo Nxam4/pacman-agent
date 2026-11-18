@@ -32,6 +32,9 @@ ROUTE_K = 8         # max dots in a planned trip
 ROUTE_FIRST = 5     # first-dot candidates tried (best by the greedy value)
 ROUTE_GHOST = 6     # route only while no active visible defender is within this distance
 ROUTE_STICK = 1.252   # hysteresis: ratio bonus for keeping the previous first dot
+GHOST_MEM = 4       # an enemy that leaves sight stays "visible" this many of its moves (0 = off)
+GHOST_MEM_NEAR = 2  # ... at the tracker's best guess if within this of the last sighting
+CYCLE_LOG_PATH = ''  # dev only: per-game 2-cycle log
 PINCER_LOG_PATH = ''  # dev only: per-game kills / conceded log ('' = off; env PINCER_LOG overrides)
 
 from contest.capture_agents import CaptureAgent
@@ -101,6 +104,26 @@ class EnemyTracker(object):
         self.prev_food = set(agent.get_food_you_are_defending(game_state).as_list()) | \
             set(agent.get_capsules_you_are_defending(game_state))
         self.kills = 0
+        self.mem = {}   # e -> (cell, is_pacman, timeleft) of the last exact sighting
+
+    def remembered(self, game_state, e, team_pos):
+        """Short ghost memory: where a just-vanished enemy is treated as visible, or None."""
+        m = self.mem.get(e)
+        if m is None or GHOST_MEM <= 0:
+            return None
+        c, was_pac, t0 = m
+        if t0 - game_state.data.timeleft > GHOST_MEM * game_state.get_num_agents():
+            self.mem.pop(e, None)
+            return None
+        if game_state.get_agent_state(e).is_pacman != was_pac:
+            return None
+        g = self.most_likely(e)
+        if abs(g[0] - c[0]) + abs(g[1] - c[1]) <= GHOST_MEM_NEAR:
+            return (int(g[0]), int(g[1]))
+        for p in team_pos:
+            if p is not None and abs(c[0] - p[0]) + abs(c[1] - p[1]) <= SIGHT_RANGE:
+                return None    # we would see it there: it has gone elsewhere
+        return c
 
     # ---- helpers -------------------------------------------------------------------------
     def _on_enemy_home_side(self, cell):
@@ -123,6 +146,7 @@ class EnemyTracker(object):
 
     # ---- main update, call once at the start of every choose_action ----------------------
     def update(self, agent, game_state):
+        game_state = getattr(game_state, '_real', game_state)
         my_pos = game_state.get_agent_position(agent.index)
         team_pos = [game_state.get_agent_position(i) for i in agent.get_team(game_state)]
         dists = game_state.get_agent_distances()
@@ -151,6 +175,10 @@ class EnemyTracker(object):
                 self.belief[e] = {pos: 1.0}
                 self.last_seen[e] = pos
                 self.last_was_pacman[e] = st.is_pacman
+                try:
+                    self.mem[e] = ((int(pos[0]), int(pos[1])), st.is_pacman, game_state.data.timeleft)
+                except Exception:
+                    pass
                 continue
             # An invader that vanishes while next to one of our agents was eaten and respawned at its
             # start (it cannot walk out of sight in one step). If instead OUR agent died and teleported,
@@ -163,6 +191,7 @@ class EnemyTracker(object):
             if eaten:
                 b = {self.start[e]: 1.0}
                 self.kills += 1
+                self.mem.pop(e, None)
             elif e in movers:                   # elapse time: uniform over legal moves (incl. stop)
                 nb = {}
                 for c, p in b.items():
@@ -219,6 +248,33 @@ class EnemyTracker(object):
         return sum(b.get(c, 0.0) for c in cells)
 
 
+
+
+class MemState(object):
+    """Read-only view of a game state in which enemies that just left sight stay visible at their
+    remembered cell (EnemyTracker.remembered). Everything else is delegated to the real state."""
+
+    def __init__(self, real, tracker, agent):
+        self._real = real
+        self._mem = {}
+        try:
+            team_pos = [real.get_agent_position(i) for i in agent.get_team(real)]
+            for e in tracker.enemies:
+                if real.get_agent_position(e) is None:
+                    c = tracker.remembered(real, e, team_pos)
+                    if c is not None:
+                        self._mem[e] = c
+        except Exception:
+            self._mem = {}
+
+    def get_agent_position(self, i):
+        p = self._real.get_agent_position(i)
+        if p is None:
+            return self._mem.get(i)
+        return p
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
 
 ##################
@@ -662,7 +718,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
     def choose_action(self, game_state):
         legal = game_state.get_legal_actions(self.index)
         try:
-            if self.tracker is not None:
+            if self.tracker is not None and not getattr(self, '_skip_update', False):
                 try:
                     self.tracker.update(self, game_state)
                 except Exception:
@@ -1087,9 +1143,51 @@ class HybridAgent(OffensiveReflexAgent):
     def choose_action(self, game_state):
         legal = game_state.get_legal_actions(self.index)
         self._force_home = False
+        self._skip_update = False
+        if GHOST_MEM > 0 and self.tracker is not None:
+            try:
+                self.tracker.update(self, game_state)
+                self._skip_update = True
+                game_state = MemState(game_state, self.tracker, self)
+            except Exception:
+                pass
+        try:
+            return self._hybrid_action(game_state, legal)
+        finally:
+            self._skip_update = False
+
+    def final(self, game_state):
+        try:
+            import os
+            path = os.environ.get('CYCLE_LOG', CYCLE_LOG_PATH)
+            if path:
+                h = [o.get_agent_position(self.index) for o in self.observation_history]
+                runs, run = [], 0
+                for t in range(2, len(h)):
+                    if h[t] == h[t - 2] and h[t] != h[t - 1]:
+                        run += 1
+                    else:
+                        if run:
+                            runs.append(run)
+                        run = 0
+                if run:
+                    runs.append(run)
+                with open(path, 'a') as f:
+                    f.write('%s %s red=%s score=%d mem=%s maxcyc=%d cyc20=%d cyc20moves=%d\n' % (
+                        game_state.data.layout.layout_name, self.index, self.red,
+                        game_state.get_score(), GHOST_MEM, max(runs + [0]),
+                        len([r for r in runs if r >= 20]), sum(r for r in runs if r >= 20)))
+        except Exception:
+            pass
+        try:
+            CaptureAgent.final(self, game_state)
+        except Exception:
+            pass
+
+    def _hybrid_action(self, game_state, legal):
         try:
             if getattr(self, 'lane', None) == 0 and self._turtle(game_state):
-                if self.tracker is not None:
+                if self.tracker is not None and not self._skip_update:
                     try:
                         self.tracker.update(self, game_state)
                     except Exception:
