@@ -81,10 +81,24 @@ def is_league(opp):
 
 
 def field_score(by_opp):
-    """Combined score% over the ext_gh_* opponents, or None if there are none."""
-    g = [(v.get("games", 0), v.get("score_pct", 0)) for k, v in by_opp.items() if is_field(k)]
+    """Combined score% over the ext_gh_* opponents, counting only games the opponent did not crash
+    or forfeit (those are free wins), or None if there are none."""
+    g = []
+    for k, v in by_opp.items():
+        if is_field(k):
+            if "clean_games" in v:
+                g.append((v["clean_games"], v.get("clean_score_pct") or 0))
+            else:                                   # report from before opponent-crash tracking
+                g.append((v.get("games", 0), v.get("score_pct", 0)))
     n = sum(x for x, _ in g)
     return round(sum(x * s for x, s in g) / n, 1) if n else None
+
+
+def opp_failed(r):
+    """The OPPONENT crashed or forfeited in this game (same rule as arena.opp_failed)."""
+    me = {0, 2} if r.get("cand_red") else {1, 3}
+    crash = r.get("blue_crash") if r.get("cand_red") else r.get("red_crash")
+    return bool(crash) or any(a not in me for a in r.get("forfeits", []))
 
 
 def game_pts(r):
@@ -97,7 +111,10 @@ def paired(a_path, b_path):
     if len(ga) != len(gb) or not ga or any(x["opponent"] != y["opponent"] or x["layout"] != y["layout"]
                                            for x, y in zip(ga, gb)):
         raise ValueError("runs are not on identical games")
-    d = [game_pts(x) - game_pts(y) for x, y in zip(ga, gb)]
+    # a game the opponent crashed/forfeited in either run is a free win, not a measurement
+    d = [game_pts(x) - game_pts(y) for x, y in zip(ga, gb) if not (opp_failed(x) or opp_failed(y))]
+    if not d:
+        raise ValueError("no game without an opponent crash")
     n = len(d)
     m = sum(d) / n
     var = sum((x - m) ** 2 for x in d) / max(1, n - 1)

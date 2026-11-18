@@ -329,12 +329,17 @@ def cmd_context(a):
     lby = dict((k, v) for k, v in cby.items() if ("/exploit_" in k or "/ext_" in k) and "/ext_gh_" not in k)
     if lby:
         out.append("Champion's regression score%% vs these when it was promoted: %s" % lby)
-    fby = dict((k.split("/ext_gh_")[-1], v) for k, v in cby.items() if "/ext_gh_" in k)
+    # by_opponent holds plain score% numbers; per-game play stats are in play_by_opponent
+    pby = (champ.get("regress") or {}).get("play_by_opponent") or {}
+    fby = sorted((k, v) for k, v in cby.items() if "/ext_gh_" in k)
     if fby:
+        def stats(k):
+            p = pby.get(k)
+            if not isinstance(p, dict):
+                return "-"
+            return "/".join(str(p.get(x, "-")) for x in ("banked", "conceded", "deaths", "dropped", "kills"))
         out.append("Champion vs the third-party teams (score%%, per game: bank/conc/died/drop/kill): %s" % ", ".join(
-            "%s %s%% %s" % (k, v.get("score_pct"), "/".join(str((v.get("play") or {}).get(x, "-"))
-                                                            for x in ("banked", "conceded", "deaths", "dropped", "kills")))
-            for k, v in sorted(fby.items())))
+            "%s %s%% %s" % (k.split("/ext_gh_")[-1], v, stats(k)) for k, v in fby))
     out.append("")
 
     bad = ("unchanged", "invalid", "smoke_fail", "unclean", "rejected", "regress_fail")

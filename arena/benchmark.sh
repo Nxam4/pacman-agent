@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 [ -n "${VIRTUAL_ENV:-}" ] || source venv/bin/activate
 GAMES=${GAMES:-24}; SEED=${SEED:-2026}
 A=${1:-my_team.py}
-B=${2:-$(ls -d arena/opponents/champ_*/ | sort -V | tail -1)my_team.py}
+B=${2:-$(ls -td arena/opponents/champ_*/ | head -1)my_team.py}   # most recently frozen = previous champion
 opps=()
 while read -r set repo _; do
   [ "$set" = bench ] || continue
@@ -30,19 +30,27 @@ ja, jb = (json.load(open(p)) for p in sys.argv[1:3])
 A, B, ts = sys.argv[3:6]
 pts = lambda r: 1.0 if r["cand_score"] > 0 else (0.5 if r["cand_score"] == 0 else 0.0)
 sa, sb = ja["summary"]["by_opponent"], jb["summary"]["by_opponent"]
-print("%-26s %8s %8s %7s   %s" % ("held-out opponent", "A score", "B score", "A-B", "A avg margin / bank / conc"))
+sc = lambda s: s.get("clean_score_pct") if s.get("clean_score_pct") is not None else s.get("score_pct", 0)
+print("score % over games the opponent did not crash/forfeit (oppX = games it did, in A's run)")
+print("%-26s %8s %8s %7s %5s   %s" % ("held-out opponent", "A score", "B score", "A-B", "oppX", "A avg margin / bank / conc"))
 for k in sa:
     a, b = sa[k], sb.get(k, {})
     pa = a.get("play") or {}
-    print("%-26s %7.1f%% %7.1f%% %+6.1f   %+6.1f / %s / %s" % (
-        k.split("/")[-1], a["score_pct"], b.get("score_pct", 0), a["score_pct"] - b.get("score_pct", 0),
+    print("%-26s %7.1f%% %7.1f%% %+6.1f %5s   %+6.1f / %s / %s" % (
+        k.split("/")[-1], sc(a), sc(b), sc(a) - sc(b), a.get("opp_crashes", "-"),
         a["avg_score"], pa.get("banked", "-"), pa.get("conceded", "-")))
-d = [pts(x) - pts(y) for x, y in zip(ja["games"], jb["games"])]
+def opp_failed(r):   # opponent crashed / forfeited: free win, not a measurement
+    me = {0, 2} if r.get("cand_red") else {1, 3}
+    return bool(r.get("blue_crash") if r.get("cand_red") else r.get("red_crash")) or \
+        any(a not in me for a in r.get("forfeits", []))
+pairs = list(zip(ja["games"], jb["games"]))
+d = [pts(x) - pts(y) for x, y in pairs if not (opp_failed(x) or opp_failed(y))]
+print("(%d of %d games skipped: opponent crashed or forfeited)" % (len(pairs) - len(d), len(pairs)))
 n = len(d); m = sum(d) / n
 se = math.sqrt(sum((x - m) ** 2 for x in d) / max(1, n - 1) / n)
 ta, tb = ja["summary"]["total"], jb["summary"]["total"]
 print("%-26s %7.1f%% %7.1f%% %+6.1f   (paired: %+.1f +- %.1f points, 95%% CI %+.1f..%+.1f)" % (
-    "TOTAL", ta["score_pct"], tb["score_pct"], ta["score_pct"] - tb["score_pct"],
+    "TOTAL", sc(ta), sc(tb), sc(ta) - sc(tb),
     100 * m, 100 * se, 100 * (m - 1.96 * se), 100 * (m + 1.96 * se)))
 bad = [(lbl, t) for lbl, t in (("A", ta), ("B", tb)) if t["crashes"] or t["timeouts"] or t.get("forfeits")]
 for lbl, t in bad:
@@ -55,5 +63,5 @@ with open(h, "a") as f:
     if new:
         f.write("time\tA\tB\tgames\tA_score\tB_score\tpaired_diff\tse\tverdict\n")
     f.write("%s\t%s\t%s\t%d\t%.1f\t%.1f\t%+.1f\t%.1f\t%s\n" % (
-        ts, A, B, n, ta["score_pct"], tb["score_pct"], 100 * m, 100 * se, verdict))
+        ts, A, B, n, sc(ta), sc(tb), 100 * m, 100 * se, verdict))
 EOF

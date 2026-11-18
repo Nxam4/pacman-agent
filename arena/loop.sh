@@ -221,7 +221,9 @@ for ((r = start_round + 1; r <= start_round + ROUNDS; r++)); do
     cp "$ppath" "$w/my_team.py"; cp "$ppath" "$w/parent.py"
     printf '%s\n' "$pid" > "$w/parent_id"; printf '%s\n' "$area" > "$w/area"
     printf '%s\n' "$dir" > "$w/direction"; printf '%s\n' "$model" > "$w/model"
-    db context "$pid" "$area" "$w/CONTEXT.md"
+    db context "$pid" "$area" "$w/CONTEXT.md" || {
+      echo "WARNING: db context failed for $w - builder gets a minimal context" >&2
+      printf '# Context\nStarting program: %s (area %s). The program database context could not be generated;\nsee arena/LEARNINGS.md and arena/db/programs.jsonl.\n' "$pid" "$area" > "$w/CONTEXT.md"; }
     prompt="$(sed -e "s|{{FILE}}|$w/my_team.py|g" -e "s|{{NOTES}}|$w/NOTES.md|g" \
                   -e "s|{{CONTEXT}}|$w/CONTEXT.md|g" -e "s|{{BUDGET}}|$BUILDER_TIMEOUT|g" "$tmpl")
 

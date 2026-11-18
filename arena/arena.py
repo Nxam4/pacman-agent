@@ -165,13 +165,26 @@ def run(candidate, opponents, games_per_opp, seed, workers, python, ext_games=No
     return run_jobs(jobs, workers, python)
 
 
+def opp_failed(r):
+    """The OPPONENT crashed or forfeited (timeouts): a free win that says nothing about us."""
+    me = {0, 2} if r.get("cand_red") else {1, 3}
+    crash = r.get("blue_crash") if r.get("cand_red") else r.get("red_crash")
+    return bool(crash) or any(a not in me for a in r.get("forfeits", []))
+
+
 def summarise(results):
     by_opp = {}
     for r in results:
         s = by_opp.setdefault(r["opponent"], {"games": 0, "wins": 0, "ties": 0, "losses": 0,
                                               "score_sum": 0, "crashes": 0, "timeouts": 0,
-                                              "forfeits": 0, "no_score": 0, "max_secs": 0})
+                                              "forfeits": 0, "no_score": 0, "max_secs": 0,
+                                              "opp_crashes": 0, "clean_games": 0, "clean_sum": 0.0})
         s["games"] += 1
+        if opp_failed(r):
+            s["opp_crashes"] += 1
+        else:
+            s["clean_games"] += 1
+            s["clean_sum"] += game_score(r)
         s["score_sum"] += r["cand_score"]
         s["wins"] += r["cand_score"] > 0
         s["ties"] += r["cand_score"] == 0
@@ -183,7 +196,7 @@ def summarise(results):
         s["max_secs"] = max(s["max_secs"], r["secs"])
     total = {k: sum(v[k] for v in by_opp.values()) for k in
              ["games", "wins", "ties", "losses", "score_sum", "crashes", "timeouts", "forfeits",
-              "no_score"]}
+              "no_score", "opp_crashes", "clean_games", "clean_sum"]}
     total["max_secs"] = max([v["max_secs"] for v in by_opp.values()] or [0])
     for s in list(by_opp.values()) + [total]:
         # contest-style points: win 3, tie 1
@@ -191,6 +204,8 @@ def summarise(results):
         # symmetric score (win 1, tie 0.5): 50 = equal strength, independent of the tie rate
         s["score_pct"] = round(100 * (s["wins"] + 0.5 * s["ties"]) / s["games"], 1) if s["games"] else 0
         s["avg_score"] = round(s["score_sum"] / s["games"], 2) if s["games"] else 0
+        # score % over the games the opponent did NOT crash/forfeit (None if it always did)
+        s["clean_score_pct"] = round(100 * s["clean_sum"] / s["clean_games"], 1) if s["clean_games"] else None
     for name, s in list(by_opp.items()) + [("TOTAL", total)]:
         s["play"] = play_summary([r for r in results if name == "TOTAL" or r["opponent"] == name])
     return {"by_opponent": by_opp, "total": total}
@@ -308,15 +323,16 @@ def main():
     summary = summarise(results)
 
     print(f"{'opponent':<28}{'W':>4}{'T':>4}{'L':>4}{'pts%':>7}{'score%':>7}{'avg':>7}{'crash':>7}"
-          f"{'slow':>6}{'forfeit':>8}{'maxs':>6} | {'bank':>5}{'conc':>5}{'died':>5}{'drop':>5}{'kill':>5}")
+          f"{'slow':>6}{'forfeit':>8}{'maxs':>6}{'oppX':>5} | {'bank':>5}{'conc':>5}{'died':>5}{'drop':>5}{'kill':>5}")
     rows = list(summary["by_opponent"].items()) + [("TOTAL", summary["total"])]
     for name, s in rows:
         pl = s.get("play") or {}
         ps = "".join(f"{pl.get(k, '-'):>5}" for k in PLAY_KEYS)
         print(f"{name:<28}{s['wins']:>4}{s['ties']:>4}{s['losses']:>4}{s['points_pct']:>7}{s['score_pct']:>7}"
               f"{s['avg_score']:>7}{s['crashes']:>7}{s['timeouts']:>6}{s['forfeits']:>8}{int(s['max_secs']):>6}"
-              f" | {ps}")
-    print("  (per game: bank = food we returned, conc = food the opponent returned, died = our Pacman "
+              f"{s['opp_crashes']:>5} | {ps}")
+    print("  (crash/slow/forfeit = OURS; oppX = games the OPPONENT crashed or forfeited (free wins, no signal). "
+          "Per game: bank = food we returned, conc = food the opponent returned, died = our Pacman "
           "deaths, drop = food we dropped dying, kill = opponent Pacmen we ate; maxs = longest game in s)")
     if sprt:
         verdict = {"H1": "BETTER (H1 accepted)", "H0": "not better (H0 accepted)",
