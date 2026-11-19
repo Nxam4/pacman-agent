@@ -33,7 +33,11 @@ Output in arena/tune/ (git-ignored): state.json (resumable), log.txt, tuned.py, 
 A running loop has priority: if arena/loop.sh starts, the tuner saves its state and exits
 (--wait-loop instead makes a starting tuner wait until no loop is running).
 Gate (--gate) = the loop's promotion rules: SPRT vs the champion [0.50, 0.55], then 12 regression
-games each vs the baseline, the 2 most recent champions (>= 30%) and the league (>= 20%).
+games each vs the baseline, the 2 most recent champions (>= 30%) and the league (>= 20%), then the
+field stage (paired with the champion, must not be measurably worse). With --field-split auto
+(default) the ext_gh_* training teams are split in two halves of similar strength (a new split each
+day): the pool plays only one half, the field stage only the other (48 games each), so the gate is
+an independent check rather than a replay of what was tuned for.
 --promote (only when tuning my_team.py): if the gate passes, freeze the old champion as
 arena/opponents/champ_rNNt, copy tuned.py to my_team.py, record it in the program DB and commit.
 """
@@ -132,6 +136,45 @@ def auto_pool():
     return champs + exps + exts
 
 
+def field_teams():
+    """The installed ext_gh_* training teams."""
+    return sorted(x for x in glob.glob(os.path.join(OPP_DIR, "ext_*", "my_team.py")) if arena.is_ext_gh(x))
+
+
+def field_split(salt):
+    """Stratified split of the training field into (tuning half, gate half).
+
+    The tuner's field gate used to play the same teams the tuner had just optimised against, so it
+    flattered the result: tune_1118_1242 was +4.3 +- 2.1 points vs the training field at the gate but
+    ~+1.2 +- 1.8 vs the held-out benchmark. Now the gate half is never played during the run.
+    Teams are sorted by the champion's score in arena/ext_teams.txt and taken in pairs of similar
+    strength; `salt` decides which of each pair goes to the gate, so the split changes from run to
+    run (no team is permanently gate-only) while both halves keep a similar strength mix."""
+    installed = field_teams()
+    score = {}
+    try:
+        for line in open(os.path.join(ROOT, "arena", "ext_teams.txt")):
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "train":
+                name = parts[1].split("/")[0].lower().replace("-", "_")
+                m = re.search(r"#\s*(\d+)", line)
+                score[os.path.join(OPP_DIR, "ext_gh_" + name, "my_team.py")] = int(m.group(1)) if m else 100
+    except IOError:
+        pass
+    ranked = sorted(installed, key=lambda x: (score.get(x, 100), x))
+    rng = random.Random(salt)
+    tune_half, gate_half = [], []
+    for i in range(0, len(ranked), 2):
+        pair = ranked[i:i + 2]
+        rng.shuffle(pair)
+        if len(pair) == 1 and rng.random() < 0.5:   # odd team out: either half
+            tune_half += pair
+            continue
+        gate_half.append(pair[0])
+        tune_half += pair[1:]
+    return tune_half, gate_half
+
+
 class Gains(object):
     """c_k and step_k for a run of n steps with a total random-walk budget of `noise` c-units."""
 
@@ -160,8 +203,9 @@ def run_cmd(cmd, log):
     return p
 
 
-def gate(tuned_src, champion, a, log):
-    """The loop's promotion rules. Returns (qualified, gate_dir)."""
+def gate(tuned_src, champion, a, log, gate_field=None):
+    """The loop's promotion rules. Returns (qualified, gate_dir). gate_field: the field teams the
+    tuner did not play (None = all of them, as the loop does)."""
     gd = os.path.join(OUT, "gate")
     shutil.rmtree(gd, ignore_errors=True)
     os.makedirs(gd)
@@ -181,6 +225,12 @@ def gate(tuned_src, champion, a, log):
     exts = sorted(glob.glob(os.path.join(OPP_DIR, "ext_*", "my_team.py")))
     field = [x for x in exts if arena.is_ext_gh(x)]
     league = [x for x in exts if not arena.is_ext_gh(x)]
+    fgames = "24"
+    if gate_field:
+        field = [x for x in field if x in gate_field]
+        fgames = "48"           # half the teams, twice the games: about as many paired games as before
+        log("field gate on the %d teams NOT played during tuning: %s" % (
+            len(field), ", ".join(os.path.basename(os.path.dirname(x)) for x in field)))
     pk = os.path.join(ROOT, "arena", "pick.py")
     core = os.path.join(gd, "regress_core.json")
     run_cmd([py, ar, cand, "--opponents", arena.BASELINE] + champs + exps + league +
@@ -190,7 +240,7 @@ def gate(tuned_src, champion, a, log):
         # field stage (as in loop.sh): candidate and champion on identical games vs the ext_gh_* teams
         cf = os.path.join(gd, "champion_field.json")
         for who, out in ((champion, cf), (cand, os.path.join(gd, "field.json"))):
-            run_cmd([py, ar, who, "--opponents"] + field + ["--games", "24", "--seed", "4343", "--json", out], log)
+            run_cmd([py, ar, who, "--opponents"] + field + ["--games", fgames, "--seed", "4343", "--json", out], log)
         subprocess.run([py, pk, "--merge", os.path.join(gd, "regress.json"), core, os.path.join(gd, "field.json")])
         extra = ["--champ-field", cf]
     else:
@@ -261,6 +311,9 @@ def main():
     ap.add_argument("--gate", action="store_true", help="run the loop's promotion gate at the end")
     ap.add_argument("--promote", action="store_true", help="promote + commit if the gate passes")
     ap.add_argument("--wait-loop", action="store_true", help="wait (instead of exit) while a loop runs")
+    ap.add_argument("--field-split", choices=("auto", "off"), default="auto",
+                    help="auto: the pool plays only half of the ext_gh_* training teams and the gate's "
+                         "field stage only the other half (an independent check); off: all in both")
     ap.add_argument("--python", default=sys.executable)
     a = ap.parse_args()
 
@@ -307,18 +360,26 @@ def main():
     names = [p["name"] for p in params]
     theta = [p["start"] for p in params]
     k, opp_stats = 0, {}
+    salt = a.seed * 1000 + int(time.strftime("%j"))      # a different field split every day
     if a.resume and os.path.exists(state_path):
         st = json.load(open(state_path))
         if st.get("names") == names and st.get("sha") == sha:
             theta, k, opp_stats = st["theta"], st["k"], st.get("opp_stats", {})
+            salt = st.get("split_salt", salt)             # same split as the run being resumed
             log("resumed at step %d" % k)
         else:
             log("state.json is for another file version / parameter set - starting fresh")
 
+    gate_field = None
+    if a.field_split == "auto" and len(field_teams()) >= 4:
+        tune_half, gate_field = field_split(salt)
+        log("field split (salt %d): tuning vs %s | gate only: %s" % (
+            salt, ", ".join(os.path.basename(os.path.dirname(x)) for x in tune_half),
+            ", ".join(os.path.basename(os.path.dirname(x)) for x in gate_field)))
     pool = []
     if a.pool:
         pool = auto_pool() if a.pool == ["auto"] else [os.path.abspath(x) for x in a.pool]
-        pool = [x for x in pool if os.path.exists(x)]
+        pool = [x for x in pool if os.path.exists(x) and not (gate_field and x in gate_field)]
     batch = a.batch or max(1, a.workers // 2)
     t0 = time.time()
     hours = a.hours or (0 if a.pairs else 2.0)
@@ -431,7 +492,8 @@ def main():
                     gains = Gains(n_total, a.noise)
                 log("calibrated: %.1f steps/min -> %d steps in the budget" % (rate * 60, n_total))
             json.dump({"file": src_path, "sha": sha, "names": names, "theta": theta, "k": k,
-                       "n_total": n_total, "opp_stats": opp_stats}, open(state_path, "w"))
+                       "n_total": n_total, "opp_stats": opp_stats, "split_salt": salt},
+                      open(state_path, "w"))
             open(os.path.join(OUT, "tuned.py"), "w").write(render(src_lines, params, theta))
             if k % (batch * 10) < batch or k >= n_total:
                 log("step %5d/%d  %s  (%.0f min, unclean %d)" % (
@@ -462,7 +524,7 @@ def main():
         if tuned_src == src.rstrip("\n") + "\n" or all(c[1] == c[2] for c in changes):
             verdict = "no parameter changed - nothing to test"
         else:
-            ok, gd = gate(tuned_src, src_path, a, log)
+            ok, gd = gate(tuned_src, src_path, a, log, gate_field)
             verdict = "PASSED the promotion gate" if ok else "did not pass the gate (champion kept)"
             report += ["", "Gate reports: `arena/tune/gate/` (sprt.json, regress.json)"]
             if ok and a.promote:

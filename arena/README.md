@@ -17,7 +17,7 @@ pacman-agent/
     opponents/exploit_*/ <- league: exploiters that beat a champion (created by the loop)
     opponents/ext_*/    <- league: teams of a different style (ext_rush, ext_turtle; add your own)
     opponents/ext_gh_*/ <- the FIELD: 12 third-party past contest entries (gitignored, fetch_ext.sh)
-    ext_teams.txt, fetch_ext.sh, benchmark.sh  <- train/bench split of third-party teams, held-out benchmark
+    ext_teams.txt, fetch_ext.sh, benchmark.sh, bench_report.py  <- train/bench split of third-party teams, held-out benchmark (pooled across runs)
     LEARNINGS.md, directions.txt (created by the loop, rewritten by the analyst)
 ```
 
@@ -135,19 +135,39 @@ warnings. Run it between loop runs, for example while the Claude usage limit res
 ## Outside opponents: training set and held-out benchmark
 26 public forks of the UPF template hold past contest entries in the same API. `arena/ext_teams.txt`
 splits them, by strength and style (one of each matched pair per side), into:
-- **train** (12): `bash arena/fetch_ext.sh` downloads every team into `arena/ext_pool/` (pinned to a
-  commit) and installs these as `arena/opponents/ext_gh_*`. The loop's regression stage and the
-  tuner's pool play them.
-- **bench** (10): the held-out benchmark. The loop and the tuner never play them.
+- **train** (11): `bash arena/fetch_ext.sh` downloads every team into `arena/ext_pool/` (pinned to a
+  commit) and installs these as `arena/opponents/ext_gh_*`. The loop's field stage plays all of
+  them. The tuner splits them each day into two halves of similar strength: its pool plays one
+  half, and its gate's field stage plays only the other (48 games each), so the gate checks teams
+  the tuner did not optimise against (`--field-split off` turns this off).
+- **bench** (9): the held-out benchmark. The loop and the tuner never play them.
   `bash arena/benchmark.sh` plays the champion and the previous champion on identical games
-  (24 per team) and prints both scores and the paired difference with a 95% interval. If the gate
-  and tuner scores rise while the benchmark stays flat or drops, the loop is overfitting. Run it
-  nightly or before a push, and never use it to choose between candidates.
-- **drop** (4): beaten by 30+ points, no signal.
+  (24 per team) and prints both scores and the paired difference with a 95% interval. Repeat runs
+  with another seed (`SEED=2027 bash arena/benchmark.sh`) are pooled game by game for the same pair
+  of files (matched by md5): read the POOLED line, since one run (about ±2.5 points) rarely settles
+  a 1-2 point difference. `python3 arena/bench_report.py --pool` prints it without playing. If the
+  gate and tuner scores rise while the benchmark stays flat or drops, the loop is overfitting. Run
+  it nightly or before a push, and never use it to choose between candidates.
+- **drop** (6): 4 beaten by 30+ points (no signal), 2 that crash in most games. Games in which an
+  opponent crashes or forfeits (the `oppX` column) are free wins and are left out of every
+  field and benchmark comparison.
 
 Rules: their code is gitignored and never committed, copied or read (builder, exploiter and analyst
 prompts forbid it). We only play against them. The repos have no licence and the organisers can
 compare submissions with earlier years' entries.
+
+**Switch-off tests** (`arena/ablate.py`, unattended: `arena/start_ablate.sh`): flips one switch
+or constant of the champion at a time (HELP_ON, TRAP_ON, GUARD_CAPS, INVADER_SNAP, ROUTE_ON,
+LANE_SPLIT, DOUBLE_ATTACK, GHOST_MEM, TURTLE_LEAD 1 → 3, SAFE_RETURN on) and plays it paired with the
+champion against the training field. Racing: variants that are clearly worse stop after one seed,
+and the close ones get more. Verdicts are NEEDED, NOT MEASURABLE (a removal candidate) or OFF IS
+BETTER. Report: `arena/ablate/REPORT.md`. No Claude usage.
+
+**Failure miner** (`arena/mine.py`): groups the champion lineage's losses against outside teams by
+pattern (OUT_RACED, DIED_LOADED, OUT_SCORED, STARVED, CLOSE), opponent, layout and colour, from
+reports already on disk. `--record N` re-plays the worst cells and saves replays to
+`arena/mine/replays/`. The loop refreshes `arena/mine/REPORT.md` before every analyst run, and the
+analyst reads it.
 
 You can still add any team by hand at `arena/opponents/ext_<name>/my_team.py`: it joins the league.
 After the test round (23 Nov), the teams and layouts we lost to are the best additions.

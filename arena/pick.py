@@ -105,20 +105,29 @@ def game_pts(r):
     return 1.0 if r["cand_score"] > 0 else (0.5 if r["cand_score"] == 0 else 0.0)
 
 
-def paired(a_path, b_path):
-    """(mean diff, standard error, n) of A minus B over games paired by order (identical games)."""
+def paired_diffs(a_path, b_path):
+    """Per-game A minus B points over games paired by order (identical games), skipping games
+    the opponent crashed/forfeited in either run (free wins, not a measurement)."""
     ga, gb = load(a_path)["games"], load(b_path)["games"]
     if len(ga) != len(gb) or not ga or any(x["opponent"] != y["opponent"] or x["layout"] != y["layout"]
                                            for x, y in zip(ga, gb)):
         raise ValueError("runs are not on identical games")
-    # a game the opponent crashed/forfeited in either run is a free win, not a measurement
-    d = [game_pts(x) - game_pts(y) for x, y in zip(ga, gb) if not (opp_failed(x) or opp_failed(y))]
-    if not d:
-        raise ValueError("no game without an opponent crash")
+    return [game_pts(x) - game_pts(y) for x, y in zip(ga, gb) if not (opp_failed(x) or opp_failed(y))]
+
+
+def mean_se(d):
     n = len(d)
     m = sum(d) / n
     var = sum((x - m) ** 2 for x in d) / max(1, n - 1)
     return m, (var / n) ** 0.5, n
+
+
+def paired(a_path, b_path):
+    """(mean diff, standard error, n) of A minus B over identical games."""
+    d = paired_diffs(a_path, b_path)
+    if not d:
+        raise ValueError("no game without an opponent crash")
+    return mean_se(d)
 
 
 def cmd_merge(out, a_path, b_path):

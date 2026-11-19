@@ -91,6 +91,7 @@ commit() {   # commit "message" paths...  (never kills the loop)
 limit_hit() { [ -f "$1" ] && grep -qE "^(You've hit your|You have hit your|You've reached your) .*limit|^Credit balance is too low|^API Error: (429|529)" "$1"; }
 run_analyst() {   # run_analyst ROUND_TAG WINNER FOCUS_BLOCK
   cp arena/directions.txt "arena/work/$1/directions_before.txt"
+  $PY arena/mine.py --quiet || echo "mine.py failed - analyst runs without a fresh loss report"
   local prompt
   prompt="$(sed -e "s|{{ROUND_DIR}}|arena/work/$1|g" -e "s|{{WINNER}}|$2|g" \
                 -e "s|{{BUILDERS}}|$BUILDERS|g" arena/prompts/analyst.md)

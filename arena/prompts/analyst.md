@@ -19,14 +19,23 @@ League: arena/opponents/exploit_rNN are exploiters (area EXPLOIT, prompts/exploi
 champion - their NOTES.md say which weakness they used; arena/opponents/ext_* are external-style
 teams. Every candidate's regression stage plays them. A weakness an exploiter found deserves a
 direction until the champion holds up against it.
-The FIELD: arena/opponents/ext_gh_* are 12 third-party past contest entries. Each candidate that
+The FIELD: arena/opponents/ext_gh_* are 11 third-party past contest entries. Each candidate that
 passes the SPRT plays them 24 games each, paired with the champion on identical games (field.json
 in its work dir; champion_field.json per round): it must not be measurably worse than the champion
 and must score >= 75% combined. A tuned version that beat the old champion 71.7% head-to-head was
 +0.4 +- 2.6 points vs held-out teams: the mirror over-states progress. They are the best proxy for the tournament -
 weight their play stats heavily when choosing directions (e.g. a raider that outscores us -> defence;
-fortresses that hold us to ~0 -> breaking a defended border). NEVER open or read their code, and
+a team that holds us to ~0 -> breaking a defended border). NEVER open or read their code, and
 never tell builders to; reason only from game results (academic integrity).
+LOSS PATTERNS: arena/mine/REPORT.md (refreshed before you start) groups all of the champion
+lineage's losses vs outside teams (training AND held-out) by pattern - OUT_RACED, DIED_LOADED,
+OUT_SCORED, STARVED, CLOSE - by opponent, by layout and by colour, with the worst opponent x
+layout x colour cells. Read it first: aim directions at the patterns that lose the most games,
+and cite its numbers. Held-out teams there are for diagnosis only: name the PATTERN in a
+direction, never a held-out team, so builders do not tune to them.
+SWITCH-OFF TESTS: if arena/ablate/REPORT.md exists, it says which features measurably help vs the
+field (NEEDED) and which have no measurable effect (removal candidates). Prefer building on NEEDED
+features; a direction may propose removing a NOT MEASURABLE one (simpler code, fewer risks).
 All past programs and their scores are in arena/db/programs.jsonl (later lines override earlier ones
 with the same id). Builder transcripts are in arena/logs/. Research digest: arena/KNOWLEDGE.md.
 Promoted this round: {{WINNER}}
